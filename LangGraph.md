@@ -674,7 +674,674 @@ print(result)  # {'user_type': 'vip', 'message': '我要退款', 'result': 'VIP�
 
 
 
+![agent__007](/Users/zhangjiewu/Desktop/docs/image/agent__007.png)
+
+在 LangGraph 中，默认情况下：
+
+-  节点（Node）提前定义好 
+-  节点之间的连接关系（Edge）提前确定 
+-  所有节点共享同一个 State
+
+但是，有一些场景提前不知道：
+
+1. **下一步需要创建多少个任务**
+2. **每个任务需要处理的数据不一样**
+
+这时候固定的 Edge 就无法满足需求。
+
+**总结：Send 是 LangGraph 实现动态并行处理的关键能力。让 Graph 图，可以根据实际输入数据，在运行的时候，动态 “派生” 出任意数量的任务节点，实现 Map‑Reduce 模式。**
+
+
+
+#### Map-Reduce模式
+
+**Map-Reduce** 是一种经典的并行计算模式，特别适合处理大规模数据。
+
+**Map-Reduce** 将复杂的数据处理任务分解为两个阶段：
+
+1. **Map阶段**：将大任务分解为多个小任务，并行处理
+2. **Reduce阶段**：将所有小任务的结果合并成最终结果
+
+``` python
+from langgraph.graph import StateGraph
+
+from langgraph.types import Send
+
+from typing import TypedDict, Annotated
+
+from operator import add
+
+
+# 状态定义
+class State(TypedDict):
+    numbers: list[int]  # 输入的数字
+    results: Annotated[list[int], add]  # worker的结果
+    final_sum: int  # 最终求和
+
+
+# 创建一个send的状态
+class WorkerState(TypedDict):
+    number: int
+
+
+# 1. Map阶段：分发数字
+def split_numbers(state: State):
+    """把数字分发给不同的worker"""
+    numbers = state["numbers"]
+
+    # 每个数字发给一个worker
+    return [Send("worker", WorkerState(number=num)) for num in numbers]
+
+
+# 2. Worker阶段：计算平方
+def calculate_square(state: WorkerState):
+    """每个worker计算一个数字的平方"""
+    number = state["number"]
+    return {"results": [number * number]}
+
+
+# 3. Reduce阶段：求和
+def sum_results(state: State):
+    """把所有结果加起来"""
+    results = state.get("results", [])
+    total = sum(results)
+    return {"final_sum": total}
+
+
+# 构建图
+def create_simple_graph():
+    graph = StateGraph(State)
+
+    # 添加节点
+    graph.add_node("splitter", lambda s: s)  # 分发器
+    graph.add_node("worker", calculate_square)  # 工作节点
+    graph.add_node("summer", sum_results)  # 求和器
+
+    # 连接节点
+    graph.add_edge("__start__", "splitter")
+    graph.add_conditional_edges("splitter", split_numbers, "worker")  # Map阶段
+    graph.add_edge("worker", "summer")  # Worker完成后求和
+    graph.add_edge("summer", "__end__")
+
+    return graph.compile()
+
+
+# 运行例子
+def run_example():
+    app = create_simple_graph()
+
+    # 测试数据
+    initial_state = {
+        "numbers": [1, 2, 3, 4, 5],
+        "results": [],
+        "final_sum": 0
+    }
+
+    print("开始计算...")
+    print("任务：计算每个数字的平方，然后求和")
+    print()
+
+    # 运行
+    result = app.invoke(initial_state)
+    print(result) # {'numbers': [1, 2, 3, 4, 5], 'results': [1, 4, 9, 16, 25], 'final_sum': 55}
+
+
+if __name__ == "__main__":
+    run_example()
+
+
+```
+
+
+
+**Map-Reduce 简单案例**
+
+``` python
+"""
+LangGraph Map-Reduce 简单案例：分解任务-进行并行执行任务-总结答案
+"""
+from typing import Annotated
+import operator
+from langgraph.graph import StateGraph, START, END
+from langgraph.types import Send
+from typing import TypedDict
+from settings import app_settings
+import asyncio
+
+# 创建模型
+model = app_settings.get_qwen_client(enable_thinking=False)  # 关键配置：关闭思考模式
+
+
+class MyState(TypedDict):
+    question: str  # 用户一次性问多个任务，通过模型进行规划，并行处理任务（计算5*8+9等于多少？；李白是谁？；帮我查询一下langgraph是什么？）
+    tasks_results: Annotated[list[str], operator.add]
+    answer: str
+
+
+class TaskState(TypedDict):
+    task_value: str
+
+
+class SplitTasksSchema(TypedDict):
+    tasks: dict[str, str]
+
+
+# 绑定结构化输出格式的模型
+structured_model = model.with_structured_output(SplitTasksSchema)
+
+
+# 定义条件边函数-任务分发
+def split_tasks(state: MyState):
+    question = state["question"]
+    prompt = f"""
+        你是一个任务分割助手，擅长将用户问题进行提取分类
+        分类格式：{{"math_node": 数学问题, "chinese_node": 语文问题, "search_node": "搜索问题"}}
+        注意：严格返回分类数据格式
+        用户问题“{question}
+
+    """
+
+    response = structured_model.invoke(prompt)
+    print('model 分类格式:\n', response)
+    tasks = response.get('tasks')
+    return [Send(task, TaskState(task_value=value)) for task, value in tasks.items()]
+
+
+# 定义节点-执行不同的任务
+def math_node(state: TaskState):
+    task_value = state["task_value"]
+    print("数学任务：", task_value)
+    return {"tasks_results": ["5*8+9=49"]}
+
+
+def chinese_node(state: TaskState):
+    task_value = state["task_value"]
+    print("语文任务：", task_value)
+    return {"tasks_results": ["李白是唐朝的诗人"]}
+
+
+def search_node(state: TaskState):
+    task_value = state["task_value"]
+    print("搜索任务：", task_value)
+    return {"tasks_results": ["langgraph是一个带状态的流程图"]}
+
+
+# 根据并行的任务去进行汇总答案
+async def summarize_answers(state: MyState):
+    tasks_results = state["tasks_results"]
+    prompt = f"""
+        你是一个总结多个任务返回结果的专家
+
+        用户问题：{state['question']}
+
+        多个并行节点返回的答案：{tasks_results}
+    """
+    answer = await model.ainvoke(prompt)
+    return {"answer": answer}
+
+
+
+
+
+def create_graph():
+    graph = StateGraph(state_schema=MyState)
+    # 添加节点
+    # graph.add_node("splitter", lambda s: s)  # 分发器
+
+    graph.add_node("math_node", math_node)  # 数学任务节点
+    graph.add_node("chinese_node", chinese_node)  # 语文任务节点
+    graph.add_node("search_node", search_node)  # 搜索任务节点
+    graph.add_node("summarize_answers", summarize_answers)  # 总结节点
+
+    # 条件入口
+    graph.set_conditional_entry_point(split_tasks, ["math_node", "chinese_node", "search_node"])
+
+
+    # 条件边
+    # graph.add_edge(START, "splitter")
+    # graph.add_conditional_edges("splitter", split_tasks, ["math_node", "chinese_node", "search_node"])  # Map阶段
+
+
+    graph.add_edge("math_node", "summarize_answers")
+    graph.add_edge("chinese_node", "summarize_answers")
+    graph.add_edge("search_node", "summarize_answers")
+    graph.add_edge("summarize_answers", END)
+
+    return graph.compile()
+
+
+
+async def main():
+    graph = create_graph()
+    res = await graph.ainvoke({"question": "计算5*8+9等于多少？；李白是谁？；帮我查询一下langgraph是什么？"})
+    res['answer'].pretty_print()
+
+
+if __name__ == '__main__':
+    asyncio.run(main())
+
+# model 分类格式:
+#  {'tasks': {'math_node': '计算5*8+9等于多少？', 'chinese_node': '李白是谁？', 'search_node': '帮我查询一下langgraph是什么？'}}
+# 数学任务： 计算5*8+9等于多少？
+# 语文任务： 李白是谁？
+# 搜索任务： 帮我查询一下langgraph是什么？
+# ================================== Ai Message ==================================
+#
+# 以下是针对您提出的三个问题的综合回答：
+#
+# 1.  **数学计算**：$5 \times 8 + 9$ 的计算结果为 **49**。
+# 2.  **人物介绍**：李白是**唐朝的诗人**，被后世誉为“诗仙”。
+# 3.  **技术查询**：LangGraph 是一个**带状态的流程图**框架，主要用于构建有状态、多代理的 LLM（大语言模型）应用程序。
+
+```
+
+**Send 用于解决动态任务分发问题。当任务数量未知，或者每个任务需要不同 State 时，可以通过 Send 在运行过程中动态创建节点执行任务，是 LangGraph 实现 Map-Reduce、多任务并行处理的重要机制。**
+
+通过  **Send**派发并行的节点接收到的状态由 Send 发送时决定；
+
+``` python
+return [Send(task, TaskState(task_value=value)) for task, value in tasks.items()]
+```
+
+``` python
+def math_node(state: TaskState):
+  
+def chinese_node(state: TaskState):
+
+def search_node(state: TaskState):
+```
+
+
+
 # Command命令
+
+Command 是 LangGraph 中用于**控制图执行流程、更新图状态，并支持人机交互、工具调用的标准化对象。**
+
+### 核心作用：
+
+ **第一，更新图的运行状态；**
+
+ **第二，控制图的执行流向（指定下一个或多个执行节点）；**
+
+ **第三，衔接中断恢复、工具调用、人机交互等场景**。
+
+
+
+### command参数拆解
+
+`update`：应用状态更新（类似于从节点返回更新）。
+
+`goto`：导航到特定节点（类似于 条件边）。
+
+`graph`：在从 子图 导航时定位到父图。
+
+`resume`：在 中断 后提供一个值以继续执行。
+
+
+
+**从节点返回****：**使用 `update`、`goto` 和 `graph` 将状态更新与控制流结合。
+
+**interrupt（人机交互）****输入到****`invoke`****或****`stream`**：在使用**interrupt**中断后使用`resume`继续执行
+
+**从工具返回****：**类似于从节点返回，结合工具内部的状态更新和控制流。
+
+
+
+在节点函数中返回时`Command`，必须添加返回类型注释，其中包含节点路由到的节点名称列表，例如`Command[Literal["my_other_node"]]`。这对于图形渲染是必需的，它告诉 LangGraph 当前节点可以导航到`my_other_node`。
+
+
+
+``` python
+from typing import Literal, TypedDict
+from langgraph.graph import StateGraph, END
+from langgraph.types import Command
+
+from settings import app_settings
+
+
+# 定义状态
+class State(TypedDict):
+    question: str
+    intent: str
+    response: str
+
+
+# 创建模型（关闭思考模式）
+model = app_settings.get_qwen_client(enable_thinking=False)
+
+
+def classify_and_route(state: State) -> Command[
+    Literal["return_department", "price_department", "tech_department", "general_department"]]:
+    """使用模型决策路由"""
+    question = state.get("question")
+
+    # 使用模型进行意图分类和路由决策
+    prompt = f"""
+    是一个智能路由助手。根据用户问题，决定应该由哪个部门处理。
+
+        可选部门：
+        - return_department: 退货、退款、售后问题
+        - price_department: 价格、优惠、费用查询
+        - tech_department: 技术故障、使用问题
+        - general_department: 其他一般咨询
+
+        请只返回部门名称，不要有其他内容
+
+        用户问题:{question}
+    """
+
+    response = model.invoke(prompt)
+    intent = response.content.strip().lower()
+
+    print(f"AI 决策: 路由到 {intent}")
+
+    # 根据模型决策跳转
+    return Command(
+        update={"intent": intent},
+        goto=intent  # 直接使用模型返回的节点名称
+    )
+
+
+def return_department(state: State) -> Command[END]:
+    print("退货部门处理...", state.get("intent"))
+    return Command(
+        update={"response": "退货流程：请提供订单号和退货原因"},
+        goto=END
+    )
+
+
+def price_department(state: State) -> Command[END]:
+    print("价格部门处理...", state.get("intent"))
+    return Command(
+        update={"response": "价格信息：当前商品价格请查看官网"},
+        goto=END
+    )
+
+
+def tech_department(state: State) -> Command[END]:
+    print("技术部门处理...", state.get("intent"))
+    return Command(
+        update={"response": "技术问题：请描述具体的错误现象"},
+        goto=END
+    )
+
+
+def general_department(state: State) -> Command[END]:
+    print("综合部门处理...", state.get("intent"))
+    return Command(
+        update={"response": "感谢咨询，我们会尽快回复"},
+        goto=END
+    )
+
+
+# 构建图
+builder = StateGraph(State)
+builder.add_node("classify_and_route", classify_and_route)
+builder.add_node("return_department", return_department)
+builder.add_node("price_department", price_department)
+builder.add_node("tech_department", tech_department)
+builder.add_node("general_department", general_department)
+
+builder.set_entry_point("classify_and_route")
+
+graph = builder.compile()
+
+# 测试
+test_questions = [
+    "我想退货，收到商品有质量问题",
+    "这个商品现在多少钱？",
+    "软件打不开了，怎么办？",
+    "你们公司在哪里？"
+]
+
+for q in test_questions:
+    print(f"\n{'=' * 50}")
+    print(f"用户问题: {q}")
+    result = graph.invoke({"question": q})
+    print(f"响应: {result['response']}")
+
+# ==================================================
+# 用户问题: 我想退货，收到商品有质量问题
+# AI 决策: 路由到 return_department
+# 退货部门处理... return_department
+# 响应: 退货流程：请提供订单号和退货原因
+#
+# ==================================================
+# 用户问题: 这个商品现在多少钱？
+# AI 决策: 路由到 price_department
+# 价格部门处理... price_department
+# 响应: 价格信息：当前商品价格请查看官网
+#
+# ==================================================
+# 用户问题: 软件打不开了，怎么办？
+# AI 决策: 路由到 tech_department
+# 技术部门处理... tech_department
+# 响应: 技术问题：请描述具体的错误现象
+#
+# ==================================================
+# 用户问题: 你们公司在哪里？
+# AI 决策: 路由到 general_department
+# 综合部门处理... general_department
+# 响应: 感谢咨询，我们会尽快回复
+
+```
+
+
+
+**使用`Command`进行`Send` 动态并行处理**
+
+``` python
+from typing import Annotated, TypedDict
+from langgraph.graph import StateGraph, END
+from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import Command, Send
+import operator
+
+from settings import app_settings
+
+model = app_settings.get_qwen_client(enable_thinking=True)
+
+
+class AdvancedState(TypedDict):
+    question: str
+    subtasks: dict[str, str]  # 子任务映射
+    results: Annotated[list[dict[str, str]], operator.add]  # 各节点结果
+    summary: str
+
+
+class SplitTasksSchema(TypedDict):
+    tasks: dict[str, str]
+
+
+class TaskState(TypedDict):
+    task: str
+
+
+structured_model = model.with_structured_output(SplitTasksSchema)
+
+
+def analyze_and_split(state: AdvancedState) -> Command[list[Send]]:
+    """AI 分析问题并拆解成多个子任务"""
+    question = state["question"]
+
+    # 使用模型分析并拆解任务
+    prompt = f"""
+        你是一个任务分析专家。分析用户问题，拆解成多个独立的子任务。
+
+        返回 JSON 格式：
+        {{
+            "tasks": {{
+                "math_handler": "数学计算子问题",
+                "knowledge_handler": "知识查询子问题", 
+                "search_handler": "信息搜索子问题"
+                }}
+        }}
+
+        可用处理器：
+        - math_handler: 处理数学计算
+        - knowledge_handler: 处理知识问答
+        - search_handler: 处理信息搜索
+        - default_handler: 处理其他问题
+
+        根据问题内容，选择合适的处理器，至少选择1个。
+
+        用户问题：{question}
+    """
+
+    result = structured_model.invoke(prompt)
+    print(result)
+    tasks = result.get("tasks", {"default_handler": question})
+
+    print(f"AI 拆解任务: {list(tasks.keys())}")
+
+    # 并行分发到多个节点
+    return Command(
+        update={
+            "subtasks": tasks
+        },
+        goto=[
+            Send(node_name, {"task": task_content})
+            for node_name, task_content in tasks.items()
+        ]
+    )
+
+
+def math_handler(state: TaskState):
+    task = state["task"]
+    print(f"数学处理: {task}")
+
+    # 模拟数学处理
+    prompt = f"""
+        你是一个数学专家，计算以下数学问题，只返回结果。
+        问题： {task}
+    """
+    result = model.invoke(prompt)
+
+    return {"results": [{"math": result.content}]}
+
+
+def knowledge_handler(state: TaskState):
+    task = state["task"]
+    print(f"知识查询: {task}")
+
+    prompt = f"""
+           你是一个知识专家，回答以下知识性问题，简洁准确
+           问题： {task}
+       """
+    result = model.invoke(prompt)
+
+    return {"results": [{"knowledge": result.content}]}
+
+
+def search_handler(state: TaskState):
+    task = state["task"]
+    print(f"信息搜索: {task}")
+
+    prompt = f"""
+              你是一个搜索专家，提供相关信息
+              问题： {task}
+          """
+    result = model.invoke(prompt)
+
+    return {"results": [{"search": result.content}]}
+
+
+def default_handler(state: TaskState):
+    task = state["task"]
+    print(f"默认处理: {task}")
+
+    prompt = f"""
+                  你是一个通用助手，处理用户的咨询。
+                  问题： {task}
+              """
+    result = model.invoke(prompt)
+
+    return {"results": [{"default": result.content}]}
+
+
+def summarize(state: AdvancedState) -> Command[END]:
+    """汇总所有结果"""
+    results = state.get("results", {})
+
+    # 使用模型生成总结
+    summary_prompt = f"""
+            你是一个总结多个任务返回结果的专家
+
+            用户问题：{state['question']}
+
+            多个并行节点返回的答案：{results}
+        """
+    summary = model.invoke(summary_prompt)
+
+    print(f"\n汇总结果: {summary.content}")
+
+    return Command(
+        update={"summary": summary.content},
+        goto=END
+    )
+
+
+def create_builder() -> CompiledStateGraph[AdvancedState]: # type: ignore[type-var]
+    # 构建图
+    builder = StateGraph(AdvancedState)
+    builder.add_node("analyze_and_split", analyze_and_split)
+    builder.add_node("math_handler", math_handler)
+    builder.add_node("knowledge_handler", knowledge_handler)
+    builder.add_node("search_handler", search_handler)
+    builder.add_node("default_handler", default_handler)
+    builder.add_node("summarize", summarize)
+
+    # 开始节点
+    builder.set_entry_point("analyze_and_split")
+
+    # 所有处理节点完成后进入汇总
+    builder.add_edge("math_handler", "summarize")
+    builder.add_edge("knowledge_handler", "summarize")
+    builder.add_edge("search_handler", "summarize")
+    builder.add_edge("default_handler", "summarize")
+
+    return builder.compile()
+
+
+def main():
+    graph = create_builder()
+
+    # 测试复杂问题
+    test_question = """
+    我想知道：
+    1. 25 * 36 等于多少？
+    2. 李白的代表作品有哪些？
+    3. 长沙在清朝的地名？
+    """
+
+    print("用户问题:", test_question)
+    print("\n" + "=" * 50)
+    result = graph.invoke({"question": test_question})
+    print("\n" + "=" * 50)
+    print("最终总结:", result['summary'])
+
+
+if __name__ == '__main__':
+    main()
+
+```
+
+
+
+`Command` 不能用于条件入口边的条件函数中；`Command` 的设计目的是**在节点函数内部**，将**状态更新**和**路由跳转**合二为一。它通常在**节点执行过程中**被返回，用于动态地改变图的执行流向。
+
+### 什么时候应该使用`Command`而不是条件边？
+
+在 LangGraph 中：
+
+- **条件边（Conditional Edge）**：适合描述**提前设计好的流程分支**
+- **Command**：适合描述**运行过程中动态产生的流程控制，还需要同时更新状态和控制流**
+
+简单判断：
+
+>  如果“下一步去哪”是工作流设计的一部分，用条件边； 如果“下一步去哪”是节点运行后临时决定的，用 Command。
+
+一句话总结：**Conditional Edge 用于定义“预先确定的工作流路径”，Command 用于处理“运行过程中动态产生的流程控制”。当节点或工具需要根据实时结果主动改变流程时，应优先使用 Command。**
 
 
 
@@ -682,7 +1349,11 @@ print(result)  # {'user_type': 'vip', 'message': '我要退款', 'result': 'VIP�
 
 
 
+
+
 # tool工具
+
+
 
 
 
@@ -690,11 +1361,17 @@ print(result)  # {'user_type': 'vip', 'message': '我要退款', 'result': 'VIP�
 
 
 
-# 检查点
+
+
+# checkpointer检查点
 
 
 
-# 长期记忆
+
+
+# store长期记忆
+
+
 
 
 
@@ -702,5 +1379,7 @@ print(result)  # {'user_type': 'vip', 'message': '我要退款', 'result': 'VIP�
 
 
 
-# 流式输出
+
+
+# stream流式输出
 
