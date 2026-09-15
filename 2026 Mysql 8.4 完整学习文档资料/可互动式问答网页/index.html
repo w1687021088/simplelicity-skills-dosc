@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MySQL 8.4 LTS 可互动式问答网页</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="app">
+        <div id="home-page" class="page active">
+            <div class="home-header">
+                <h1>MySQL 8.4 LTS 可互动式问答</h1>
+                <p class="subtitle">基于完整学习文档内容，共 5 大阶段 250 道题目</p>
+            </div>
+            <div class="stages-row" id="stages-container"></div>
+            <div class="home-footer">
+                <p>本资料由「高品质IT资源 / xy769003723321/小苏IT资源铺」独家提供</p>
+            </div>
+        </div>
+
+        <div id="quiz-page" class="page">
+            <div class="quiz-top-bar">
+                <button id="back-home-btn" class="btn-outline">返回首页</button>
+                <div class="quiz-status">
+                    <span id="stage-label" class="status-item"></span>
+                    <span id="progress-label" class="status-item"></span>
+                    <span id="accuracy-label" class="status-item"></span>
+                </div>
+            </div>
+            <div class="quiz-content">
+                <div class="question-header">
+                    <div class="question-number-type">
+                        <span id="question-number"></span>
+                        <span id="question-type-badge" class="type-badge"></span>
+                    </div>
+                    <div id="question-tags" class="tags-row"></div>
+                </div>
+                <div id="question-text" class="question-text"></div>
+                <div id="options-container" class="options-list"></div>
+                <button id="submit-btn" class="btn-primary" disabled>提交答案</button>
+                <div id="result-feedback" class="feedback hidden"></div>
+                <div id="explanation-box" class="explanation-box hidden"></div>
+                <button id="next-btn" class="btn-primary hidden">下一题</button>
+            </div>
+        </div>
+
+        <div id="result-page" class="page">
+            <div class="result-card">
+                <h2>阶段完成</h2>
+                <div id="result-stage-name" class="result-stage"></div>
+                <div class="result-stats">
+                    <div class="stat-block">
+                        <div class="stat-value" id="result-total"></div>
+                        <div class="stat-label">总题数</div>
+                    </div>
+                    <div class="stat-block">
+                        <div class="stat-value correct-color" id="result-correct"></div>
+                        <div class="stat-label">答对</div>
+                    </div>
+                    <div class="stat-block">
+                        <div class="stat-value wrong-color" id="result-wrong"></div>
+                        <div class="stat-label">答错</div>
+                    </div>
+                    <div class="stat-block">
+                        <div class="stat-value" id="result-accuracy"></div>
+                        <div class="stat-label">正确率</div>
+                    </div>
+                </div>
+                <button id="result-home-btn" class="btn-primary">返回首页</button>
+            </div>
+        </div>
+    </div>
+
+    <script src="questions-s1.js"></script>
+    <script src="questions-s2.js"></script>
+    <script src="questions-s3.js"></script>
+    <script src="questions-s4.js"></script>
+    <script src="questions-s5.js"></script>
+    <script src="app.js"></script>
+</body>
+</html>
