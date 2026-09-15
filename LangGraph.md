@@ -1347,6 +1347,66 @@ if __name__ == '__main__':
 
 # runtime运行时
 
+创建图时，还可以标记图的某些部分是可配置的。这样做通常是为了方便在模型或系统提示之间切换。这允许创建单个“认知架构”（图），但拥有多个不同的实例。
+
+**在运行图时提供额外的“配置参数”而不是“状态参数”**，并且通过类型约束这些参数。
+
+**传递非图状态的依赖信息，为节点提供执行所需的辅助资源，同时不干扰图状态的正常流转和更新**。
+
+配置参数通过 context设置；
+
+``` python
+from langgraph.graph import StateGraph
+from langgraph.runtime import Runtime
+from typing import TypedDict
+
+
+# 定义状态结构
+class MyState(TypedDict):
+    question: str
+    answer: str
+
+
+# 定义配置结构
+class MyContext:
+    language: str  # 配置中包含语言选项，比如 "en" 或 "zh"
+
+
+# 节点函数可以访问 runtime 参数  runtime 可以访问上下文和内存存储
+def step1(_: MyState, runtime: Runtime[MyContext]):
+    language = runtime.context.get("language")
+    if language == "zh":
+        answer = "你好！"
+    else:
+        answer = "Hello!"
+    return {"answer": answer}
+
+
+# 构建图..
+graph = StateGraph(state_schema=MyState, context_schema=MyContext)
+graph.add_node("step1", step1)
+
+graph.set_entry_point("step1")
+
+# 编译
+app = graph.compile()
+
+# 执行时传入 config 参数（区分于 state）
+result = app.invoke({"question": "Hi"}, context={"language": "zh"})
+print(result)  # => {"question": "Hi", "answer": "你好！"}
+
+```
+
+
+
+## 递归限制
+
+
+
+
+
+## 重试策略
+
 
 
 
