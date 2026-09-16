@@ -1,14 +1,12 @@
 # LangGraph
 
-**LangGraph** 是由 **LangChain** 团队推出的一个开源框架，用于构建**复杂、可控、有状态（Stateful）的 AI Agent（智能体）工作流**。它的核心思想是：**用图（Graph）来组织 AI 的执行流程，而不是简单的线性调用。** 
-
-
+**LangGraph** 是由 **LangChain** 团队推出的一个开源框架，用于构建**复杂、可控、有状态（Stateful）的 AI Agent（智能体）工作流**
+。它的核心思想是：**用图（Graph）来组织 AI 的执行流程，而不是简单的线性调用。**
 
 ![image-20260915094236533](/Users/zhangjiewu/Library/Application Support/typora-user-images/image-20260915094236533.png)
 
-`create_agent` 目前可以实现理解用户意图、自动选择工具、调用工具、根据结果继续推理；但是都基于提示词约束整体的流程，并让 LLM 决策流程；
-
-
+`create_agent` 目前可以实现理解用户意图、自动选择工具、调用工具、根据结果继续推理；但是都基于提示词约束整体的流程，并让 LLM
+决策流程；
 
 ## 状态图
 
@@ -20,25 +18,17 @@
 2. 每一步节点之间如何扭转；
 3. 整个流程图中的状态如何流动和更新；
 
-
-
 LangGraph 不只是流程控制，还强调：
 
 1. 每个节点执行前和执行后都可以访问和修改状态；
 2. 状态在整个流程图中流动（每个节点都可以访问和修改）；
 3. 节点的跳转可以依据状态来判断；
 
-
-
 所以 LangGraph 被称为有状态的流程图，而不是静态的；
-
-
 
 ## 创建流程图
 
 通过 langgraph 的 StateGraph 类来创建流程图；
-
-
 
 ### 第一步：定义状态
 
@@ -56,8 +46,6 @@ class MyState(TypedDict):
 
 推荐使用 `TypedDict` 类来定义状态；
 
-
-
 ### 第二步：创建节点
 
 ``` python
@@ -74,8 +62,6 @@ def answer_node(state: MyState):
     return {"answer": "这是最终答案"}
 ```
 
-
-
 ### 第三步：流程图注册
 
 ```python
@@ -83,8 +69,6 @@ graph = StateGraph(state_schema=MyState)
 ```
 
 通过graph将节点进行注册和连接（确定工作流程）
-
-
 
 ### 第四步： 添加节点
 
@@ -94,8 +78,6 @@ graph.add_node("answer_node", answer_node)
 ```
 
 每个节点就是Graph的每个流程节点；
-
-
 
 ### 第五步：添加边（流程）
 
@@ -109,8 +91,6 @@ graph.add_edge("answer_node", "__end__")  # 从answer_node节点结束
 ```
 
 将节点通过**“边”**串联起来；
-
-
 
 ### 第六步：实例化
 
@@ -134,17 +114,11 @@ result = my_graph.invoke({"question": "这是问题？"})
 print(result)
 ```
 
-
-
 # 状态
 
 在使用 LangGraph 构建流程图之前，**第一件事**就是定义图的状态 `State`。这是整个图运行中用于**共享和传递信息**的核心机制。
 
-
-
 **LangGraph** 中的 **State** 是图中所有节点（**Node**）之间传递数据的**模式结构**，可以类比为一个共享的上下文字典，它包含输入、输出、中间变量等。
-
-
 
 定义 **State** 时，需要包含两个部分：
 
@@ -152,7 +126,8 @@ print(result)
 
    TypedDict 是标准库的一部分（来自 typing 模块），零依赖，零性能开销而 Pydantic 会在每一步创建模型实例，会增加运行时负担
 
-   LangGraph 中的 **State** 实质就是一个字典（**dict**），而 TypedDict 就是“**有类型注解**的 **dict**”，与 LangGraph 的执行机制无缝对接，而 Pydantic 是类结构，需要 .dict() 转换，略显多余
+   LangGraph 中的 **State** 实质就是一个字典（**dict**），而 TypedDict 就是“**有类型注解**的 **dict**”，与 LangGraph
+   的执行机制无缝对接，而 Pydantic 是类结构，需要 .dict() 转换，略显多余
 
    ``` python
    from typing import TypedDict
@@ -172,29 +147,27 @@ print(result)
 
 2. **多个模式（Multiple Schemas）：**在大多数情况下，LangGraph 使用一个统一的 State 模式。但你也可以设置“输入模式”和“输出模式”分开
 
-   1. **输入模式**：接收用户输入的字段（如 `question`）
+    1. **输入模式**：接收用户输入的字段（如 `question`）
 
-      ``` python
-      # 输入字段：用户的问题
-      class InputState(TypedDict):
-          question: str
-      
-      # 其他逻辑...
-      
-      result = app.invoke({"question": "什么是LangGraph？"})
-      ```
+       ``` python
+       # 输入字段：用户的问题
+       class InputState(TypedDict):
+           question: str
+       
+       # 其他逻辑...
+       
+       result = app.invoke({"question": "什么是LangGraph？"})
+       ```
 
-      这样，输入的时候只能输入 **question** 字段；
+       这样，输入的时候只能输入 **question** 字段；
 
-   2. **输出模式**：只保留最终输出的字段（如 `final_answer`）
+    2. **输出模式**：只保留最终输出的字段（如 `final_answer`）
 
-      ``` python
-      # 输出字段：只想返回最终答案
-      class OutputState(TypedDict):
-          final_answer: str
-      ```
-
-
+       ``` python
+       # 输出字段：只想返回最终答案
+       class OutputState(TypedDict):
+           final_answer: str
+       ```
 
 **完整例子：**
 
@@ -252,11 +225,10 @@ result = app.invoke({"question": "什么是LangGraph？"})
 print(result)  # {'final_answer': '根据搜索结果：搜索了：什么是LangGraph？，这是答案'}
 ```
 
-
-
 ## Reducer
 
-**Reducer（归并函数）**：在 LangGraph 中，所有节点返回的都是“局部更新结果”，**Reducer 是用于合并多个节点输出更新的机制**。 **将每个节点返回的“局部状态更新”统一合并进全局的 State。**
+**Reducer（归并函数）**：在 LangGraph 中，所有节点返回的都是“局部更新结果”，**Reducer 是用于合并多个节点输出更新的机制**。 *
+*将每个节点返回的“局部状态更新”统一合并进全局的 State。**
 
 ![agent__006](/Users/zhangjiewu/Desktop/docs/image/agent__006.png)
 
@@ -265,8 +237,6 @@ print(result)  # {'final_answer': '根据搜索结果：搜索了：什么是Lan
 但多数情况下需要保留旧状态，通过归并函数的方式追加状态；
 
 节点中去进行更新属性的时候默认是进行替换， 需要加上**from operator import add**保证这个属性是进行追加的；
-
-
 
 **示例：**
 
@@ -319,35 +289,27 @@ print(result) # {'messages': ['这是开始', '这是节点1', '这是节点2', 
 
 ```
 
-
-
-
-
 ## 图形状态
 
 **为什么要使用消息？**
 
-大多数现代 LLM 提供商都提供聊天模型接口，接受消息列表作为输入。LangChain尤其接受`ChatModel`对象列表以`Message`作为输入。这些消息有多种形式，例如`HumanMessage`（用户输入）或`AIMessage`（LLM 响应）。
-
-
+大多数现代 LLM 提供商都提供聊天模型接口，接受消息列表作为输入。LangChain尤其接受`ChatModel`对象列表以`Message`
+作为输入。这些消息有多种形式，例如`HumanMessage`（用户输入）或`AIMessage`（LLM 响应）。
 
 **在图表中使用消息**
 
-在许多情况下，将之前的对话历史记录以消息列表的形式存储在图状态中会很有帮助。为此，我们可以向图状态添加一个键（通道），该键存储`Message`对象列表，并使用 Reducer 函数对其进行注释。Reducer 函数对于指示图如何`Message`在每次状态更新（例如，当节点发送更新时）时更新状态中的对象列表至关重要。如果您未指定 Reducer，则每次状态更新都会用最新提供的值覆盖消息列表。如果您只想将消息附加到现有列表中，可以使用`operator.add`。
+在许多情况下，将之前的对话历史记录以消息列表的形式存储在图状态中会很有帮助。为此，我们可以向图状态添加一个键（通道），该键存储
+`Message`对象列表，并使用 Reducer 函数对其进行注释。Reducer 函数对于指示图如何`Message`
+在每次状态更新（例如，当节点发送更新时）时更新状态中的对象列表至关重要。如果您未指定
+Reducer，则每次状态更新都会用最新提供的值覆盖消息列表。如果您只想将消息附加到现有列表中，可以使用`operator.add`。
 
-
-
-```Python
 operator 是 Python 的一个内置模块，把常见的运算符（如 +、-、==、getitem 等）变成了函数，方便函数式编程和高阶函数使用。
-```
 
+有场景可能还需要手动更新图状态中的消息（例如，人机交互）。 如果想去修改之前的某一个状态，但使用 `operator.add`
+，您发送到图的手动状态更新将被附加到现有消息列表中，而不是更新现有消息。
 
-
-有场景可能还需要手动更新图状态中的消息（例如，人机交互）。 如果想去修改之前的某一个状态，但使用 `operator.add`，您发送到图的手动状态更新将被附加到现有消息列表中，而不是更新现有消息。
-
-为了避免这种情况，您需要一个能够跟踪**消息 ID** 并在更新时覆盖现有消息的 Reducer。 为此，您可以使用预构建 **add_messages** 函数。 对于新消息，它只会附加到现有列表中，但它也会正确处理现有消息的更新。
-
-
+为了避免这种情况，您需要一个能够跟踪**消息 ID** 并在更新时覆盖现有消息的 Reducer。 为此，您可以使用预构建 **add_messages**
+函数。 对于新消息，它只会附加到现有列表中，但它也会正确处理现有消息的更新。
 
 ``` python
 from langchain_core.messages import AnyMessage
@@ -359,11 +321,10 @@ class GraphState(TypedDict):
     messages: Annotated[list[AnyMessage], add_messages]
 ```
 
-
-
 ### MessagesState
 
-由于在状态中包含消息列表非常常见，因此存在一个名为`MessagesState`的预建状态，它使使用消息变得非常简单。该状态`MessagesState`使用单个键定义`messages`，该键是对象列表`AnyMessage`并使用`add_messages`。通常，需要跟踪的状态不仅仅是消息，所以我们可以通过继承的方式
+由于在状态中包含消息列表非常常见，因此存在一个名为`MessagesState`的预建状态，它使使用消息变得非常简单。该状态
+`MessagesState`使用单个键定义`messages`，该键是对象列表`AnyMessage`并使用`add_messages`。通常，需要跟踪的状态不仅仅是消息，所以我们可以通过继承的方式
 
 例如：
 
@@ -375,17 +336,11 @@ class State(MessagesState):
     documents: list[str]
 ```
 
-
-
-
-
 # 节点
 
 **节点（Nodes）是图中执行逻辑的基本单位**。每个节点表示一个**函数步骤、处理阶段或子逻辑流程**，多个节点通过边连接成有向图，组成一个完整的有状态计算流程。
 
 **LangGraph 中的节点就是你定义的一个函数**，用于接收状态、执行逻辑，并返回更新后的状态
-
-
 
 ``` python
 def my_node(state: dict) -> dict:
@@ -393,9 +348,7 @@ def my_node(state: dict) -> dict:
     return {"new_key": "new_value"}
 ```
 
- LangGraph 会自动用 **reducer** 把这些更新合并进全局状态。
-
-
+LangGraph 会自动用 **reducer** 把这些更新合并进全局状态。
 
 ## START节点
 
@@ -415,8 +368,6 @@ graph.add_edge("__start__", "node_01")
 graph.set_entry_point("node_01")
 ```
 
-
-
 ## END节点
 
 Node`END`是一个特殊节点，表示终端节点。当需要指示哪些边在完成后没有操作时，可以引用此节点。
@@ -432,8 +383,6 @@ graph.add_edge("node_03", "__end__")
 ```
 
 如果结束节点后续没有其他的节点跳转，不添加结束节点也可以；（建议加上，毕竟即使有 AI Coding写代码，代码大多数情况还是给程序员看的）；
-
-
 
 ## 并行运行节点
 
@@ -479,19 +428,14 @@ graph = builder.compile()
 print(graph.invoke({"aggregate": ["start"]}))
 ```
 
-
-
 另外：节点也可以是**子逻辑流程**，在多智能体开发中用作**子agent**；
-
-
 
 # 边
 
-**Edge（边）** 是连接节点的通道，表示图中**节点之间的执行跳转关系**。可以把它理解为「节点执行完之后，下一步去哪，是构成 LangGraph 流程图的核心。
+**Edge（边）** 是连接节点的通道，表示图中**节点之间的执行跳转关系**。可以把它理解为「节点执行完之后，下一步去哪，是构成
+LangGraph 流程图的核心。
 
 **Edge 是 LangGraph 中连接两个节点的“执行路径”**，控制流程的走向。
-
-
 
 ## 普通边
 
@@ -500,8 +444,6 @@ print(graph.invoke({"aggregate": ["start"]}))
 ``` python
 graph.add_edge("节点A", "节点B")
 ```
-
-
 
 ## 条件边
 
@@ -579,8 +521,6 @@ print(result)  # {'type': 'a', 'result': '走了 A 分支'}
 
 ```
 
-
-
 ## 入口点
 
 当图开始运行时首先运行的第一个（些）节点。
@@ -590,10 +530,6 @@ from langgraph.graph import START
 
 graph.add_edge(START, "node_a")
 ```
-
-
-
-
 
 ## 条件入口点
 
@@ -666,21 +602,15 @@ print(result)  # {'user_type': 'vip', 'message': '我要退款', 'result': 'VIP�
 
 ```
 
-
-
-
-
 # Send并行
-
-
 
 ![agent__007](/Users/zhangjiewu/Desktop/docs/image/agent__007.png)
 
 在 LangGraph 中，默认情况下：
 
--  节点（Node）提前定义好 
--  节点之间的连接关系（Edge）提前确定 
--  所有节点共享同一个 State
+- 节点（Node）提前定义好
+- 节点之间的连接关系（Edge）提前确定
+- 所有节点共享同一个 State
 
 但是，有一些场景提前不知道：
 
@@ -689,9 +619,8 @@ print(result)  # {'user_type': 'vip', 'message': '我要退款', 'result': 'VIP�
 
 这时候固定的 Edge 就无法满足需求。
 
-**总结：Send 是 LangGraph 实现动态并行处理的关键能力。让 Graph 图，可以根据实际输入数据，在运行的时候，动态 “派生” 出任意数量的任务节点，实现 Map‑Reduce 模式。**
-
-
+**总结：Send 是 LangGraph 实现动态并行处理的关键能力。让 Graph 图，可以根据实际输入数据，在运行的时候，动态 “派生”
+出任意数量的任务节点，实现 Map‑Reduce 模式。**
 
 #### Map-Reduce模式
 
@@ -791,8 +720,6 @@ if __name__ == "__main__":
 
 
 ```
-
-
 
 **Map-Reduce 简单案例**
 
@@ -935,7 +862,8 @@ if __name__ == '__main__':
 
 ```
 
-**Send 用于解决动态任务分发问题。当任务数量未知，或者每个任务需要不同 State 时，可以通过 Send 在运行过程中动态创建节点执行任务，是 LangGraph 实现 Map-Reduce、多任务并行处理的重要机制。**
+**Send 用于解决动态任务分发问题。当任务数量未知，或者每个任务需要不同 State 时，可以通过 Send 在运行过程中动态创建节点执行任务，是
+LangGraph 实现 Map-Reduce、多任务并行处理的重要机制。**
 
 通过  **Send**派发并行的节点接收到的状态由 Send 发送时决定；
 
@@ -951,21 +879,17 @@ def chinese_node(state: TaskState):
 def search_node(state: TaskState):
 ```
 
-
-
 # Command命令
 
 Command 是 LangGraph 中用于**控制图执行流程、更新图状态，并支持人机交互、工具调用的标准化对象。**
 
 ### 核心作用：
 
- **第一，更新图的运行状态；**
+**第一，更新图的运行状态；**
 
- **第二，控制图的执行流向（指定下一个或多个执行节点）；**
+**第二，控制图的执行流向（指定下一个或多个执行节点）；**
 
- **第三，衔接中断恢复、工具调用、人机交互等场景**。
-
-
+**第三，衔接中断恢复、工具调用、人机交互等场景**。
 
 ### command参数拆解
 
@@ -977,19 +901,14 @@ Command 是 LangGraph 中用于**控制图执行流程、更新图状态，并�
 
 `resume`：在 中断 后提供一个值以继续执行。
 
-
-
 **从节点返回****：**使用 `update`、`goto` 和 `graph` 将状态更新与控制流结合。
 
 **interrupt（人机交互）****输入到****`invoke`****或****`stream`**：在使用**interrupt**中断后使用`resume`继续执行
 
 **从工具返回****：**类似于从节点返回，结合工具内部的状态更新和控制流。
 
-
-
-在节点函数中返回时`Command`，必须添加返回类型注释，其中包含节点路由到的节点名称列表，例如`Command[Literal["my_other_node"]]`。这对于图形渲染是必需的，它告诉 LangGraph 当前节点可以导航到`my_other_node`。
-
-
+在节点函数中返回时`Command`，必须添加返回类型注释，其中包含节点路由到的节点名称列表，例如
+`Command[Literal["my_other_node"]]`。这对于图形渲染是必需的，它告诉 LangGraph 当前节点可以导航到`my_other_node`。
 
 ``` python
 from typing import Literal, TypedDict
@@ -1125,8 +1044,6 @@ for q in test_questions:
 # 响应: 感谢咨询，我们会尽快回复
 
 ```
-
-
 
 **使用`Command`进行`Send` 动态并行处理**
 
@@ -1326,9 +1243,8 @@ if __name__ == '__main__':
 
 ```
 
-
-
-`Command` 不能用于条件入口边的条件函数中；`Command` 的设计目的是**在节点函数内部**，将**状态更新**和**路由跳转**合二为一。它通常在**节点执行过程中**被返回，用于动态地改变图的执行流向。
+`Command` 不能用于条件入口边的条件函数中；`Command` 的设计目的是**在节点函数内部**，将**状态更新**和**路由跳转**合二为一。它通常在
+**节点执行过程中**被返回，用于动态地改变图的执行流向。
 
 ### 什么时候应该使用`Command`而不是条件边？
 
@@ -1339,11 +1255,10 @@ if __name__ == '__main__':
 
 简单判断：
 
->  如果“下一步去哪”是工作流设计的一部分，用条件边； 如果“下一步去哪”是节点运行后临时决定的，用 Command。
+> 如果“下一步去哪”是工作流设计的一部分，用条件边； 如果“下一步去哪”是节点运行后临时决定的，用 Command。
 
-一句话总结：**Conditional Edge 用于定义“预先确定的工作流路径”，Command 用于处理“运行过程中动态产生的流程控制”。当节点或工具需要根据实时结果主动改变流程时，应优先使用 Command。**
-
-
+一句话总结：**Conditional Edge 用于定义“预先确定的工作流路径”，Command 用于处理“运行过程中动态产生的流程控制”。当节点或工具需要根据实时结果主动改变流程时，应优先使用
+Command。**
 
 # runtime运行时
 
@@ -1397,49 +1312,794 @@ print(result)  # => {"question": "Hi", "answer": "你好！"}
 
 ```
 
-
-
 ## 递归限制
 
+递归限制设置图在单次执行中可以执行的最大超步数。一旦达到限制，LangGraph 将出现`GraphRecursionError`。默认情况下，此值设置为
+1000 步。可以在运行时在任何图上设置递归限制，并将其传递给`.invoke`/`.stream`通过配置字典。
+
+通俗理解：节点跳转节点计数为1，递归限制就是控制节点之间跳转的次数
+
+``` python
+import operator
+from typing import Annotated, Literal
+
+from langchain_core.runnables import RunnableConfig
+from langgraph.errors import GraphRecursionError
+from typing_extensions import TypedDict
+from langgraph.graph import StateGraph
+from langgraph.managed.is_last_step import RemainingSteps
 
 
+class State(TypedDict):
+    aggregate: Annotated[list, operator.add]
+    remaining_steps: RemainingSteps
 
+
+def a(state: State):
+    print(f'Node A sees {state["aggregate"]}', state["remaining_steps"])
+    return {"aggregate": ["A"]}
+
+
+def b(state: State):
+    print(f'Node B sees {state["aggregate"]}', state["remaining_steps"])
+    return {"aggregate": ["B"]}
+
+
+# Define nodes
+builder = StateGraph(State)
+builder.add_node(a)
+builder.add_node(b)
+
+
+# Define edges
+def route(state: State) -> Literal["b", "__end__"]:
+    if state["remaining_steps"] <= 8:
+        return "b"  # "__end__"
+    else:
+        return "b"
+
+
+builder.add_edge("__start__", "a")
+builder.add_conditional_edges("a", route)
+builder.add_edge("b", "a")
+graph = builder.compile()
+
+config: RunnableConfig = {
+    "recursion_limit": 10,  # 设置递归限制
+}
+
+# Test it out
+try:
+    result = graph.invoke({"aggregate": []}, config=config)
+    print(result)
+except GraphRecursionError as e:
+    print(f"图执行步骤过多: {e}")
+
+# Node A sees [] 9
+# Node B sees ['A'] 8
+# Node A sees ['A', 'B'] 7
+# {'aggregate': ['A', 'B', 'A']}
+
+```
+
+关键点就是 设置`recursion_limit`
+
+``` python
+config: RunnableConfig = {
+    "recursion_limit": 10,  # 设置递归限制
+}
+```
 
 ## 重试策略
 
+1. **LLM API 超时**或达到速率限制（Rate Limit）。
+2. **数据库连接**瞬时抖动。
+3. **网络请求**失败（5xx 错误）。
+
+在 LangGraph 中，我们通过 `add_node` 的 `retry_policy` 参数来增强节点的健壮性。
+
+``` python
+默认情况下，retry_on 参数使用 default_retry_on 函数，
+该函数会在任何异常上重试，但不包括以下情况：
+
+ValueError,
+TypeError,
+ArithmeticError,
+ImportError,
+LookupError,
+NameError,
+SyntaxError,
+RuntimeError,
+ReferenceError,
+StopIteration,
+StopAsyncIteration,
+OSError,
+```
+
+``` python
+from langgraph.types import RetryPolicy  
+# 使用默认策略（自动过滤掉无法通过重试解决的错误，如 SyntaxError） 
+builder.add_node("agent", agent_node, retry_policy=RetryPolicy())
+```
+
+``` python
+import sqlite3
+from langchain.chat_models import init_chat_model
+from langgraph.graph import END, MessagesState, StateGraph, START
+from langgraph.types import RetryPolicy
+from langchain_community.utilities import SQLDatabase
+from langchain.messages import AIMessage, HumanMessage
+from langgraph.runtime import Runtime
+from dotenv import load_dotenv
+
+load_dotenv()
+
+db = SQLDatabase.from_uri("sqlite:///:memory:")
+model = init_chat_model("deepseek-chat")
 
 
+def query_database(state: MessagesState, runtime: Runtime):
+    print(f"正在尝试第 {runtime.execution_info.node_attempt} 次查询...")
+    # 手动抛出一个异常来强制触发重试
+    if runtime.execution_info.node_attempt < 3:
+        print("模拟数据库连接失败...")
+        raise sqlite3.OperationalError("Database connection lost")
 
+    query_result = db.run("SELECT 1;")  # 模拟成功
+    return {"messages": [AIMessage(content=str(query_result))]}
+
+
+def call_model(state: MessagesState):
+    response = model.invoke(state["messages"])
+    return {"messages": [response]}
+
+
+# Define a new graph
+builder = StateGraph(MessagesState)
+builder.add_node(
+    "query_database",
+    query_database,
+    retry_policy=RetryPolicy(retry_on=[sqlite3.OperationalError, sqlite3.IntegrityError]),  # 可以自己设定需要触发的异常类
+)
+builder.add_node("model", call_model, retry_policy=RetryPolicy(max_attempts=5))  # 重试次数
+builder.add_edge(START, "model")
+builder.add_edge("model", "query_database")
+builder.add_edge("query_database", END)
+graph = builder.compile()
+
+response = graph.invoke({"messages": [HumanMessage(content="你好呀？")]})
+print(response)
+```
+
+# 可视化图谱
+
+``` python
+"""
+LangGraph Map-Reduce 简单案例：数字求和
+把一堆数字分给多个worker算平方，然后把结果加起来
+"""
+from typing import Annotated
+import operator
+from langgraph.graph import StateGraph, START, END
+from langgraph.types import Send
+from typing import TypedDict, List
+
+
+# 状态定义
+class State(TypedDict):
+    numbers: List[int]  # 输入的数字
+    number: int
+    results: Annotated[list[int], operator.add]  # worker的结果
+    final_sum: int  # 最终求和
+
+
+# 1. Map阶段：分发数字
+def split_numbers(state: State):
+    """把数字分发给不同的worker"""
+    numbers = state["numbers"]
+    # print(f"分发数字: {numbers}")
+
+    # 每个数字发给一个worker
+    return [Send("worker", {"number": num}) for num in numbers]
+
+
+# 2. Worker阶段：计算平方
+def calculate_square(state: State):
+    """每个worker计算一个数字的平方"""
+    number = state["number"]
+    square = number * number
+    # print(f"Worker: {number}² = {square}")
+    return {"results": [square]}
+
+
+# 3. Reduce阶段：求和
+def sum_results(state: State):
+    """把所有结果加起来"""
+    results = state.get("results", [])
+    total = sum(results)
+    # print(f"求和: {results} = {total}")
+    return {"final_sum": total}
+
+
+# 构建图
+def create_simple_graph():
+    graph = StateGraph(State)
+
+    # 添加节点
+    graph.add_node("splitter", lambda s: s)  # 分发器
+    graph.add_node("worker", calculate_square)  # 工作节点
+    graph.add_node("summer", sum_results)  # 求和器
+
+    # 连接节点
+    graph.add_edge(START, "splitter")
+    graph.add_conditional_edges("splitter", split_numbers, ["worker"])  # Map阶段
+    graph.add_edge("worker", "summer")  # Worker完成后求和
+    graph.add_edge("summer", END)
+
+    return graph.compile()
+
+
+# 运行例子
+def run_example():
+    app = create_simple_graph()
+
+    # 测试数据
+    initial_state = {
+        "numbers": [1, 2, 3, 4, 5],
+        "results": [],
+        "final_sum": 0
+    }
+
+    # print("开始计算...")
+    # print("任务：计算每个数字的平方，然后求和")
+    # print()
+
+    # 运行
+    app.invoke(initial_state)
+
+    # 方法1：可视化成png图片
+    # from IPython.display import Image, display
+    # display(
+    #     Image(
+    #         app.get_graph().draw_mermaid_png(output_file_path="./send并行.png")
+    #     )
+    # )
+    # 方法2：转换成 Mermaid 语法
+    print(app.get_graph().draw_mermaid())
+
+if __name__ == "__main__":
+    run_example()
+```
+
+将输出结果复制粘贴到可视化图网站 https://mermaidviewer.com/
+
+``` python
+---
+config:
+  flowchart:
+    curve: linear
+---
+graph TD;
+	__start__([<p>__start__</p>]):::first
+	splitter(splitter)
+	worker(worker)
+	summer(summer)
+	__end__([<p>__end__</p>]):::last
+	__start__ --> splitter;
+	splitter -.-> worker;
+	worker --> summer;
+	summer --> __end__;
+	classDef default fill:#f2f0ff,line-height:1.2
+	classDef first fill-opacity:0
+	classDef last fill:#bfb6fc
+```
+
+![image-20260916094232393](/Users/zhangjiewu/Desktop/docs/image/agent__008.png)
 
 # tool工具
 
+**在langgraph中实现工具调用：就是使用function call实现**
+
+**工具**封装了可调用函数及其输入模式。这些可以传递给兼容的聊天模型，让模型决定是否调用工具以及使用哪些参数。
+
+1. 将工具绑定到模型中
+
+   ``` python
+   @tool
+   def get_weather(city: str) -> str:
+       """
+       获取指定城市的天气
+       Arg:
+           city(str):城市名称
+       Return:
+           str - 天气情况
+       """
+       return f"{city}的天气是晴天"
+       
+   # 定义工具列表
+   tools = [get_weather]
+   
+   from settings import app_settings
+   
+   model = app_settings.get_qwen_client()
+   ```
 
 
+2. 模型根据问题返回tool_calls工具选择列表
 
+   ``` python
+   def call_model(state: MessagesState):
+       # 获取messages消息列表
+       messages = state.get("messages", [])
+   
+       before_model(messages)
+   
+       # 2.模型根据问题返回tool_calls工具选择列表   # 添加系统提示词
+       response = model_with_tools.invoke([*messages])
+   
+       after_model([*messages, response])
+   
+       if response.tool_calls:
+           return Command(
+               update={
+                   "messages": [response]
+               },
+               goto="tool_node"
+           )
+   
+       return Command(
+           update={
+               "messages": [response]
+           },
+           goto="__end__"
+       )
+   ```
+
+3. 手动执行工具，获取工具的结果添加到聊天历史中
+
+   **langgraph** 提供了 **ToolNode** 节点，并在内部执行；
+
+4. 模型根据用户问题和工具的结果给出最终答案
+
+``` python
+from langgraph.prebuilt import ToolNode
+from langgraph.graph import StateGraph, MessagesState, END, add_messages
+from langgraph.types import Command
+from settings import app_settings
+
+model = app_settings.get_qwen_client()
+
+@tool
+def get_weather(city: str) -> str:
+    """
+    获取指定城市的天气
+    Arg:
+        city(str):城市名称
+    Return:
+        str - 天气情况
+    """
+    return f"{city}的天气是晴天"
+
+# 定义工具列表
+tools = [get_weather]
+
+# 1.将工具绑定到模型中
+model_with_tools = model.bind_tools(tools)
+
+
+# 定义工作流
+# 定义调用模型的节点
+def call_model(state: MessagesState):
+    # 获取messages消息列表
+    messages = state.get("messages", [])
+
+    # 2.模型根据问题返回tool_calls工具选择列表   # 添加系统提示词
+    response = model_with_tools.invoke([*messages])
+
+    if response.tool_calls:
+        return Command(
+            update={
+                "messages": [response]
+            },
+            goto="tool_node"
+        )
+
+    return Command(
+        update={
+            "messages": [response]
+        },
+        goto="__end__"
+    )
+
+
+# 3.手动执行工具，获取工具的结果添加到聊天历史中, 定义工具执行节点   ToolNode是langgraph预构建的工具执行节点
+tool_node = ToolNode(tools)
+
+builder = StateGraph(MessagesState)
+
+# 添加模型调用和工具调用节点
+builder.add_node("call_model", call_model)
+builder.add_node("tool_node", tool_node)
+
+# 添加开始节点
+builder.set_entry_point("call_model")
+
+# 添加边    根据langchain创建智能体的流程：从工具回到模型这一条边是固定的
+# 这条边是必须返回到 model 的， 因为 model 会根据 tool 的结果进行判断是否循环；
+builder.add_edge("tool_node", "call_model")
+
+graph = builder.compile()
+
+result = graph.invoke(
+    {"messages":
+        [
+            {"role": "user", "content": "今天广州天气怎么样？"}
+        ]
+    }
+)
+```
+
+也可以采用条件边的方式，langgraph 提供了 tools_condition 函数用来判断是否跳转到工具节点；
+
+``` python
+# 添加条件边   因为模型判断是否要使用工具，循环
+builder.add_conditional_edges(
+    source="call_model",
+    path=tools_condition, # tools_condition 内部会做一个判断是否有 tool_calls 参数
+    path_map={"tools": "tool_node", END: "__end__"}
+)
+
+
+# 改为条件边的话， call_model需要改造下
+
+def call_model(state: MessagesState):
+    # 获取messages消息列表
+    messages = state.get("messages", [])
+
+    # 2.模型根据问题返回tool_calls工具选择列表   # 添加系统提示词
+    response = model_with_tools.invoke([*messages])
+
+    return {
+        "messages": [response] # 返回Ai Message决策的回复，如果需要调用工具，则必然返回一个 Tool Calls
+    }
+
+```
+
+相当于
+
+``` python
+def should_continue(state: MessagesState):
+    messages = state["messages"]
+    # 取出最后一条消息
+    last_message = messages[-1]
+    # 如果在最后一条消息中包含tool_calls，就代表当前要使用工具
+    if last_message.tool_calls:
+        return "tools"
+    return END
+```
+
+或者
+
+``` python
+    if response.tool_calls:
+        return Command(
+            update={
+                "messages": [response]
+            },
+            goto="tool_node"
+        )
+
+    return Command(
+        update={
+            "messages": [response]
+        },
+        goto="__end__"
+    )
+```
+
+**tools_condition** 本质就是一个用来判断是否跳往 tools 节点的一个判断函数；
+
+定义工具执行节点, langgraph 提供的，简化了需要写 function calling 执行方法；
+
+``` python
+tool_node = ToolNode(tools)
+```
+
+**工具节点**回传给到 **Model节点**时必须的，需要将工具的结果给到模型，让模型决策；
+
+``` python
+builder.add_edge("tool_node", "call_model")
+```
+
+完整示例
+
+``` python
+from langchain.tools import tool
+from langgraph.prebuilt import ToolNode
+from langgraph.graph import StateGraph, MessagesState
+from langgraph.types import Command
+from settings import app_settings
+import asyncio
+
+model = app_settings.get_qwen_client()
+
+
+@tool
+async def get_weather(city: str) -> str:
+    """
+    获取指定城市的天气
+    Arg:
+        city(str):城市名称
+    Return:
+        str - 天气情况
+    """
+    return f'{city}的天气是晴天'
+
+
+tools = [get_weather]
+
+# 将工具绑定到模型中
+model_with_tools = model.bind_tools(tools)
+
+# 工具节点
+tool_node = ToolNode(tools)
+
+
+async def model_node(state: MessagesState):
+    """模型节点"""
+
+    # 获取messages消息列表
+    messages = state.get("messages", [])
+
+    # 2.模型根据问题返回tool_calls工具选择列表   # 添加系统提示词
+    response = await model_with_tools.ainvoke([*messages])
+    # 如果有工具调用，则跳转到工具节点
+    if response.tool_calls:
+        return Command(
+            update={
+                "messages": [response]
+            },
+            goto="tool_node"
+        )
+    # 结束
+    return Command(
+        update={
+            "messages": [response]
+        },
+        goto="__end__"
+    )
+
+
+def create_graph():
+    """创建一个状态图，包含模型节点和工具节点"""
+    builder = StateGraph(MessagesState)
+    builder.add_node("model_node", model_node)
+    builder.add_node("tool_node", tool_node)
+    builder.set_entry_point("model_node")
+    builder.add_edge("tool_node", "model_node")
+    return builder.compile()
+
+
+async def main():
+    graph = create_graph()
+
+    result = await graph.ainvoke(
+        {"messages":
+            [
+                {"role": "user", "content": "今天广州天气怎么样？"}
+            ]
+        }
+    )
+
+    result["messages"][-1].pretty_print()
+
+
+if __name__ == '__main__':
+    asyncio.run(main())
+
+```
 
 # 子图
 
+LangGraph子图（Subgraph）是一种模块化的图结构，允许您将复杂的工作流分解为更小的、可重用的组件。就像函数在编程中的作用一样，子图提供了封装和复用的能力。
+
+## 子图的优势
+
+1. **代码复用**：避免重复编写相同的逻辑
+2. **清晰的架构**：将复杂流程分解为清晰的模块
+3. **易于维护**：修改子图只需在一个地方进行
+4. **团队协作**：不同团队可以独立开发不同的子图
+5. **测试友好**：可以单独测试子图的功能
+
+## 两种状态通讯
+
+**共享状态键（Shared State Keys）**
+
+父图和子图在其状态模式中有共享的状态键。在这种情况下，您可以将子图作为节点包含在父图中。
+
+``` python
+from langgraph.graph import StateGraph, MessagesState
+
+from settings import app_settings
+
+llm = app_settings.get_qwen_client()
 
 
+def create_sub(state_schema):
+    def summarize_child_node(state: MessagesState) -> MessagesState:
+        """对大模型的回答进行摘要总结"""
+        # 获取大模型回答的内容进行摘要总结
+        answer = state["messages"][-1].content
+        summary_prompt = f"请用一句话总结下面这句话：\n\n答：{answer}"
+        response = llm.ainvoke(summary_prompt)
+        return {"messages": state["messages"] + [response]}
+
+    # 创建子图
+    child = StateGraph(state_schema=state_schema)
+
+    # 添加节点
+    child.add_node("summarize_child_node", summarize_child_node)
+
+    # 设置子图的入口节点
+    child.set_entry_point("summarize_child_node")
+
+    return child.compile()
+# 关键点：父图通过将子图作为父图的节点，父图默认将当前状态传递给子图
+
+
+def create_graph(child_node):
+    def answer_parent_node(state: MessagesState) -> MessagesState:
+        """使用大模型进行回答"""
+        # 使用大模型进行回答
+        answer = llm.ainvoke(state["messages"])
+        return {"messages": state["messages"] + [answer]}
+
+    # 创建父图
+    parent = StateGraph(state_schema=MessagesState)
+
+    # 添加节点
+    parent.add_node("answer_parent_node", answer_parent_node)
+
+    # 添加子图节点
+    parent.add_node("child_node", child_node)
+
+    # 添加边
+    parent.add_edge("answer_parent_node", "child_node")
+
+    # 设置父图的入口节点
+    parent.set_entry_point("answer_parent_node")
+
+    return parent.compile()
+
+
+def main():
+    # 创建子图
+    graph_sub = create_sub(state_schema=MessagesState)
+
+    # 创建父图
+    graph = create_graph(graph_sub)
+
+    # 测试
+    input_state = {
+        "messages": [{"role": "user", "content": "langgraph是什么？"}],
+    }
+
+    # 测试父图
+    result = graph.invoke(input_state)
+
+    for message in result['messages']:
+        message.pretty_print()
+
+
+if __name__ == '__main__':
+    main()
+
+```
+
+关键点：父图通过将子图作为父图的节点，父图默认将当前状态传递给子图
+
+```python
+# 添加子图节点
+parent.add_node("child_node", child_node)
+```
+
+**不同状态模式（Different State Schemas）**
+父图和子图有不同的模式（状态模式中没有共享的状态键）。在这种情况下，您必须在父图的节点内部调用子图：这在父图和子图有不同状态模式且需要在调用子图前后转换状态时很有用。
+
+```python
+from langgraph.graph import StateGraph, MessagesState
+from typing_extensions import TypedDict, Annotated
+from langchain_core.messages import AnyMessage, RemoveMessage
+from langgraph.graph.message import add_messages
+from settings import app_settings
+
+llm = app_settings.get_qwen_client()
+
+
+# 创建子图
+class SubgraphMessagesState(TypedDict):
+    subgraph_messages: Annotated[list[AnyMessage], add_messages]
+
+
+def subplot(state: SubgraphMessagesState) -> SubgraphMessagesState:
+    # 获取大模型回答的内容进行摘要总结
+    answer = state["subgraph_messages"][-1].content
+    # 创建摘要总结提示
+    summary_prompt = f"请用一句话总结下面这句话：\n\n答：{answer}"
+    # 使用大模型进行摘要总结
+    response = llm.invoke(summary_prompt)
+    # 将摘要总结添加到子图消息中
+    return {"subgraph_messages": [response]}
+
+
+summary_subgraph = (
+    StateGraph(state_schema=SubgraphMessagesState)
+    .add_node("subplot", subplot)
+    .set_entry_point("subplot")
+    .compile()
+)
+
+
+# 创建父图
+
+def answer_node(state: MessagesState) -> MessagesState:
+    # 使用大模型进行回答
+    answer = llm.invoke(state["messages"])
+    # 将大模型回答添加到父图消息中
+    parent_messages = [*state["messages"], answer]
+    # 将父图的消息传递给子图, 调用子图进行摘要总结
+    summary_result = summary_subgraph.invoke({"subgraph_messages": parent_messages})
+    # 获取摘要总结
+    summary_message = summary_result["subgraph_messages"][-1]
+    # 将大模型回答和摘要总结添加到父图消息中
+    return {
+        "messages": [answer, summary_message]
+    }
+    # return {
+    #     "messages": [
+    #         RemoveMessage(id=state["messages"][0].id),  # 删除第1条（用户消息）
+    #         # RemoveMessage(id=answer.id),  # 删除第2条（原始回答）
+    #         summary_message]
+    # }
+
+
+parent_graph = (
+    StateGraph(state_schema=MessagesState)
+    .add_node("answer_node", answer_node)
+    .set_entry_point("answer_node")
+    .compile()
+)
+
+# 测试输入
+input_state = {
+    "messages": [{"role": "user", "content": "langgraph是什么？"}],
+}
+result = parent_graph.invoke(input_state)
+print("最终结果：")
+
+for message in result["messages"]:
+    message.pretty_print()
+
+```
+
+### 总结：
+
+**小型项目或快速原型常用“添加子图作为节点（共享状态）”**，而**大型、生产级系统更倾向于“调用节点内的子图（状态转换）”**。
+
+**补充：**
+
+**共享状态：子图“融入”父图，父图可以把它当成一个节点来调度，所以整体看起来还是一张图。**
+
+**不同状态：子图“独立”运行，父图只负责传入参数、接收结果，相当于调用一个独立的小流程，所以父图不会展开它内部的节点。**
+
+**子图默认只能控制自己的内部节点。如果需要跳转到父图中的节点（包括进入另一个子图），需要使用** **`Command(graph=Command.PARENT)`** **将控制权提升到父图，由父图完成下一步路由。但不能直接跳转到另一个子图内部节点。**
 
 
 # checkpointer检查点
 
-
-
-
-
 # store长期记忆
 
-
-
-
-
 # 多智能体
-
-
-
-
 
 # stream流式输出
 

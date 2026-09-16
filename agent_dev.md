@@ -5060,6 +5060,8 @@ if __name__ == "__main__":
    from settings import app_settings
    
    model = app_settings.get_qwen_client()
+   
+   model_with_tools = model.bind_tools(tools) # 绑定上
    ```
 
    
@@ -5257,18 +5259,17 @@ builder.add_edge("tool_node", "call_model")
 完整示例
 
 ``` python
-from langchain.tools import tool
 from langgraph.prebuilt import ToolNode
 from langgraph.graph import StateGraph, MessagesState
 from langgraph.types import Command
+from langchain.tools import tool, ToolRuntime
 from settings import app_settings
-import asyncio
 
 model = app_settings.get_qwen_client()
 
 
 @tool
-async def get_weather(city: str) -> str:
+def get_weather(city: str, runtime: ToolRuntime[None, MessagesState]) -> str:
     """
     获取指定城市的天气
     Arg:
@@ -5276,27 +5277,26 @@ async def get_weather(city: str) -> str:
     Return:
         str - 天气情况
     """
-    return f'{city}的天气是晴天'
+    print(runtime.state.get("messages"))
+    return f"{city}的天气是晴天"
 
 
+# 定义工具列表
 tools = [get_weather]
 
-# 将工具绑定到模型中
+# 1.将工具绑定到模型中
 model_with_tools = model.bind_tools(tools)
 
-# 工具节点
-tool_node = ToolNode(tools)
 
-
-async def model_node(state: MessagesState):
-    """模型节点"""
-
+# 定义工作流
+# 定义调用模型的节点
+def call_model(state: MessagesState):
     # 获取messages消息列表
     messages = state.get("messages", [])
 
     # 2.模型根据问题返回tool_calls工具选择列表   # 添加系统提示词
-    response = await model_with_tools.ainvoke([*messages])
-    # 如果有工具调用，则跳转到工具节点
+    response = model_with_tools.invoke([*messages])
+
     if response.tool_calls:
         return Command(
             update={
@@ -5304,7 +5304,7 @@ async def model_node(state: MessagesState):
             },
             goto="tool_node"
         )
-    # 结束
+
     return Command(
         update={
             "messages": [response]
@@ -5313,32 +5313,31 @@ async def model_node(state: MessagesState):
     )
 
 
-def create_graph():
-    """创建一个状态图，包含模型节点和工具节点"""
-    builder = StateGraph(MessagesState)
-    builder.add_node("model_node", model_node)
-    builder.add_node("tool_node", tool_node)
-    builder.set_entry_point("model_node")
-    builder.add_edge("tool_node", "model_node")
-    return builder.compile()
+# 3.手动执行工具，获取工具的结果添加到聊天历史中, 定义工具执行节点   ToolNode是langgraph预构建的工具执行节点
+tool_node = ToolNode(tools)
 
+builder = StateGraph(MessagesState)
 
-async def main():
-    graph = create_graph()
+# 添加模型调用和工具调用节点
+builder.add_node("call_model", call_model)
+builder.add_node("tool_node", tool_node)
 
-    result = await graph.ainvoke(
-        {"messages":
-            [
-                {"role": "user", "content": "今天广州天气怎么样？"}
-            ]
-        }
-    )
+# 添加开始节点
+builder.set_entry_point("call_model")
 
-    result["messages"][-1].pretty_print()
+# 添加边    根据langchain创建智能体的流程：从工具回到模型这一条边是固定的
+# 这条边是必须返回到 model 的， 因为 model 会根据 tool 的结果进行判断是否循环；
+builder.add_edge("tool_node", "call_model")
 
+graph = builder.compile()
 
-if __name__ == '__main__':
-    asyncio.run(main())
+result = graph.invoke(
+    {"messages":
+        [
+            {"role": "user", "content": "今天广州天气怎么样？"}
+        ]
+    }
+)
 
 ```
 
