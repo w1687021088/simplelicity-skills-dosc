@@ -1899,9 +1899,15 @@ if __name__ == '__main__':
 
 ```
 
+
+
 # 子图
 
 LangGraph子图（Subgraph）是一种模块化的图结构，允许您将复杂的工作流分解为更小的、可重用的组件。就像函数在编程中的作用一样，子图提供了封装和复用的能力。
+
+
+
+![agent__009](/Users/zhangjiewu/Desktop/docs/image/agent__009.png)
 
 ## 子图的优势
 
@@ -2095,11 +2101,2015 @@ for message in result["messages"]:
 **子图默认只能控制自己的内部节点。如果需要跳转到父图中的节点（包括进入另一个子图），需要使用** **`Command(graph=Command.PARENT)`** **将控制权提升到父图，由父图完成下一步路由。但不能直接跳转到另一个子图内部节点。**
 
 
+# 多智能体
+
+代理是一种使用 LLM 来决定应用程序控制流的系统。随着这些系统的开发，它们可能会随着时间的推移变得更加复杂，从而更难以管理和扩展。例如，您可能会遇到以下问题：
+- 代理可以使用的工具太多，无法决定下一步调用哪个工具
+- 环境变得过于复杂，单个代理无法跟踪
+- 系统中需要多个专业领域（例如规划师、研究员、数学专家等）
+
+
+
+为了解决这些问题，您可以考虑将应用程序拆分成多个较小的独立代理，并将它们组合成一个多代理系统。这些独立代理可以像提示符和 LLM 调用一样简单，也可以像ReAct代理一样复杂（甚至更多！）。
+
+- 使用多代理系统的主要好处是：
+- 模块化：独立的代理使得代理系统的开发、测试和维护变得更加容易。
+- 专业化：您可以创建专注于特定领域的专家代理，这有助于提高整体系统性能。
+- 控制：您可以明确控制代理如何通信。
+
+
+
+![agent__010](/Users/zhangjiewu/Desktop/docs/image/agent__010.png)
+
+## 交接（Handoffs）
+
+### 交接概念
+
+在多智能体架构中，智能体可以表示为图节点。每个智能体节点执行其步骤，并决定是完成执行还是路由至其他智能体，包括可能路由至自身（例如，循环运行）。多智能体交互中一种常见的模式是**切换**，即一个智能体将控制权移交给另一个智能体
+
+### 交接的关键要点
+
+- 任务超出当前智能体能力范围
+- 需要专业化处理
+- 错误处理和重试机制
+- 工作流程的自然转换点
+
+### 工具进行交接（重点）
+
+
+
+![agent__011](/Users/zhangjiewu/Desktop/docs/image/agent__011.png)
+
+``` python
+from typing import Literal
+
+from langchain.tools import tool, ToolRuntime
+from langchain.messages import ToolMessage, HumanMessage
+from langgraph.types import Command
+from langgraph.graph import MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode
+from settings import app_settings
+
+# 初始化大模型
+llm = app_settings.get_qwen_client(temperature=0.7)
+
+
+def make_handoff_tool(*, agent_name: str):
+    """
+    创建一个工具交接函数，用于在代理之间进行转接
+
+    Args:
+        agent_name (str): 目标代理的名称
+
+    Returns:
+        tool: 返回一个可以执行代理转接的工具函数
+    """
+    # 根据目标代理名称动态生成工具名称
+    tool_name = f"transfer_to_{agent_name}"
+
+    @tool(tool_name)
+    def handoff_to_agent(
+            runtime: ToolRuntime
+    ):
+        """请求另一个代理的帮助进行任务交接"""
+
+        # 返回Command对象，用于导航到父图中的另一个代理节点
+        return Command(
+            # 导航到目标代理节点
+            goto=agent_name,
+            # 没有Command.PARENT只会在当前图中去找节点，加上Command.PARENT 就能够看到当前图的节点和父图的节点，然后就能跳转父图和自己的任何节点中
+            graph="__parent__",
+            # 更新状态：将完整的消息历史传递给目标代理，并添加工具消息
+            # 这确保了聊天历史的完整性和有效性
+            update={"messages": runtime.state["messages"] + [
+                ToolMessage(name=tool_name, content=f"成功转接到 {agent_name} 代理，请开始进行乘法运算",
+                            tool_call_id=runtime.tool_call_id)]},
+        )
+
+    return handoff_to_agent
+
+
+def make_agent(model, tools, system_prompt=None):
+    """
+    创建一个智能代理，能够使用工具并在需要时进行代理转接
+
+    Args:
+        model: 语言模型实例
+        tools: 代理可用的工具列表
+        system_prompt: 系统提示词，定义代理的角色和行为
+
+    Returns:
+        compiled_graph: 编译后的代理图
+    """
+    # 将工具绑定到模型上
+    model_with_tools = model.bind_tools(tools)
+
+    # 创建工具节点
+    tool_node = ToolNode(tools)
+
+    def call_model(state: MessagesState) -> Command[Literal["call_tools", "__end__"]]:
+        """
+        调用语言模型生成响应
+
+        Args:
+            state: 当前消息状态
+
+        Returns:
+            Command: 如果需要调用工具则转到 call_tools，否则结束
+        """
+        messages = state["messages"]
+        # 如果有系统提示词，将其添加到消息开头
+        if system_prompt:
+            messages = [{"role": "system", "content": system_prompt}] + messages
+
+        # 调用绑定了工具的模型
+        response = model_with_tools.invoke(messages)
+
+        # 检查模型是否决定使用工具
+        if len(response.tool_calls) > 0:
+            # 如果有工具调用，转到工具执行节点
+            return Command(goto="call_tools", update={"messages": [response]})
+
+        # 如果没有工具调用，直接返回响应消息
+        return Command(update={"messages": [response]}, goto="__end__")
+
+    # 构建代理的内部图结构
+    graph = StateGraph(MessagesState)
+
+    # 添加模型调用节点和工具调用节点
+    graph.add_node("call_model", call_model)
+    graph.add_node("call_tools", tool_node)
+
+    # 设置图的边：从开始到模型调用，从工具调用回到模型调用
+    graph.set_entry_point("call_model")
+
+    # 添加从工具调用回到模型调用的边
+    graph.add_edge("call_tools", "call_model")
+
+    # 编译并返回图
+    return graph.compile()
+
+
+def pretty_print_stream(chunk):
+    """
+    流式输出美化工具
+    """
+    # StreamPart 对象包含三个核心属性
+    # msg_type = chunk["type"]  # str: 'updates', 'metadata', 'values' 等
+    # ns = chunk["ns"]  # tuple: 命名空间
+    data = chunk["data"]  # Any: 更新的具体内容
+    for node_name, node_update in data.items():
+        # 1. 打印节点标题（区分是谁在干活）
+        print(f"\n正在运行节点: [{node_name}]")
+        print("-" * 30)
+
+        # 2. 检查是否有消息更新
+        if "messages" in node_update:
+            for msg in node_update["messages"]:
+                # --- 核心提取逻辑 ---
+
+                # 如果是 AI 说的话
+                if msg.type == "ai":
+                    if msg.content:
+                        print(f"AI: {msg.content.strip()}")
+                    if msg.tool_calls:
+                        for tc in msg.tool_calls:
+                            print(f"[工具调用] 执行 {tc['name']}，参数: {tc['args']}")
+
+                # 如果是工具返回的结果
+                elif msg.type == "tool":
+                    print(f"[工具结果] 得到: {msg.content}")
+
+                # 如果是人类的输入
+                elif msg.type == "human":
+                    print(f"用户: {msg.content}")
+
+
+# ============= 定义数学工具 =============
+
+@tool
+def add(a: int, b: int) -> int:
+    """执行两个数字的加法运算"""
+    result = a + b
+    print(f"执行加法: {a} + {b} = {result}")
+    return result
+
+
+@tool
+def multiply(a: int, b: int) -> int:
+    """执行两个数字的乘法运算"""
+    result = a * b
+    print(f"执行乘法: {a} × {b} = {result}")
+    return result
+
+
+@tool
+def subtract(a: int, b: int) -> int:
+    """执行两个数字的减法运算"""
+    result = a - b
+    print(f"执行减法: {a} - {b} = {result}")
+    return result
+
+
+@tool
+def divide(a: int, b: int) -> float:
+    """执行两个数字的除法运算"""
+    if b == 0:
+        return "错误：不能除以零"
+    result = a / b
+    print(f"执行除法: {a} ÷ {b} = {result}")
+    return result
+
+
+# ============= 演示单个代理 =============
+
+def demo_single_agent():
+    """演示单个具有所有数学工具的代理"""
+    print("=" * 60)
+    print("演示：单个数学代理")
+    print("=" * 60)
+
+    # 创建一个拥有所有数学工具的代理
+    math_agent = make_agent(
+        llm,
+        [add, multiply, subtract, divide],
+        system_prompt="你是一个数学专家，可以执行各种数学运算。请一步步解决问题。"
+    )
+
+    print("问题: 计算 (3 + 5) × 12")
+    print()
+
+    # 运行代理并显示结果
+    for chunk in math_agent.stream(
+            {"messages": [HumanMessage(content="请计算 (3 + 5) × 12")]},
+            version="v2",
+            stream_mode="updates"
+    ):
+        pretty_print_stream(chunk)
+
+
+# ============= 演示多代理协作 =============
+
+def demo_multi_agent_collaboration():
+    """演示多个专业代理之间的协作"""
+    print("=" * 60)
+    print("演示：多代理协作系统")
+    print("=" * 60)
+
+    transfer_to_addition_expert = make_handoff_tool(agent_name="addition_expert")
+
+    transfer_to_multiplication_expert = make_handoff_tool(agent_name="multiplication_expert")
+
+    # 创建加法专家代理
+    addition_expert = make_agent(
+        llm,
+        [add, subtract, transfer_to_multiplication_expert],
+        system_prompt="""你是加法和减法专家。你精通加法和减法运算，必须使用工具去计算加法。
+            当你完成加法或减法运算后，如果后续还需要乘法或除法运算，
+            请立即使用 transfer_to_multiplication_expert 工具转接给乘法专家。
+            不要尝试自己完成乘法运算。"""
+    )
+
+    # 创建乘法专家代理
+    multiplication_expert = make_agent(
+        llm,
+        [multiply, divide, transfer_to_addition_expert],
+        system_prompt="""你是乘法和除法专家。你精通乘法和除法运算。
+            当你接收到需要乘法运算的任务时，必须使用工具执行乘法运算。
+            如果后续还需要加法或减法运算，请使用 transfer_to_addition_expert 工具转接给加法专家。
+            当前任务：执行乘法运算并给出最终答案。"""
+    )
+
+    # 构建多代理协作图
+    builder = StateGraph(MessagesState)
+
+    # 添加两个专家代理节点
+    builder.add_node("addition_expert", addition_expert)
+    builder.add_node("multiplication_expert", multiplication_expert)
+
+    # 设置入口点为加法专家
+    builder.set_entry_point("addition_expert")
+
+    # 编译协作图
+    collaboration_graph = builder.compile()
+
+    print("问题: 计算 (3 + 5) × 12")
+    print("加法专家将处理加法，然后转接给乘法专家处理乘法")
+    print()
+
+    # 运行协作图并显示子图中的所有更新
+    for chunk in collaboration_graph.stream(
+            {"messages": [HumanMessage(content="请计算 (3 + 5) × 12")]},
+            subgraphs=True,  # 包含子图更新
+            version="v2",
+            stream_mode="updates"
+    ):
+        pretty_print_stream(chunk)
+
+
+# ============= 更复杂的协作示例 =============
+
+def demo_complex_collaboration():
+    """演示更复杂的多步骤协作"""
+    print("=" * 60)
+    print("演示：复杂多步协作")
+    print("=" * 60)
+
+    # 创建基础运算专家
+    basic_math_expert = make_agent(
+        llm,
+        [add, subtract, make_handoff_tool(agent_name="advanced_math_expert")],
+        system_prompt="""你是基础数学专家。你的唯一职责是执行“加法(add)”和“减法(subtract)”。
+        执行逻辑规范：
+        1. 观察算式，如果存在可以直接进行的加法或减法（尤其是括号内的），请立即调用工具计算。
+        2. 严禁尝试口算，必须通过工具获得结果。
+        3. 严禁执行乘法或除法。如果你发现当前步骤必须先进行乘除法才能继续，请立即转接给高级专家。
+        4. 只要你刚刚完成了一步加/减法计算，请停下来观察剩下的算式：
+           - 如果剩下的算式里还有你能算的加减法，继续算。
+           - 如果剩下的部分只涉及乘除法，立即转接到 advanced_math_expert。
+        不要道歉，不要解释，只负责计算或转接。"""
+    )
+
+    # 创建高级运算专家
+    advanced_math_expert = make_agent(
+        llm,
+        [multiply, divide, make_handoff_tool(agent_name="basic_math_expert")],
+        system_prompt="""你是高级数学专家。你的唯一职责是执行“乘法(multiply)”和“除法(divide)”。
+        执行逻辑规范：
+        1. 观察算式，如果你发现当前必须先执行加法或减法（例如括号内的内容尚未解出），请立即转接到 basic_math_expert。
+        2. 如果当前步骤可以直接进行乘法或除法，请立即调用工具计算。
+        3. 严禁尝试口算，必须通过工具获得结果。
+        4. 只要你刚刚完成了一步乘/除法计算，请停下来观察剩下的算式：
+           - 如果剩下的算式需要基础运算（加减），立即转接到 basic_math_expert。
+           - 如果剩下的全是乘除，继续计算直到得出最终结果。
+        你的目标是完成计算，但在遇到加减法时要坚决交接，不要自己通过“口算”来跳过步骤。"""
+    )
+
+    # 构建协作图
+    builder = StateGraph(MessagesState)
+    builder.add_node("basic_math_expert", basic_math_expert)
+    builder.add_node("advanced_math_expert", advanced_math_expert)
+    builder.set_entry_point("basic_math_expert")
+
+    complex_graph = builder.compile()
+
+    print("复杂问题: 计算 ((10 + 5) × 3 - 8) ÷ 2")
+    print("将需要多次代理转接来完成计算")
+    print()
+
+    for chunk in complex_graph.stream(
+            {"messages": [HumanMessage(content="请逐步计算 ((10 + 5) × 3 - 8) ÷ 2")]},
+            subgraphs=True,
+            version="v2",
+            stream_mode="updates"
+    ):
+        pretty_print_stream(chunk)
+
+
+# ============= 主程序入口 =============
+
+def main():
+    """主程序，运行所有演示"""
+    print("LangGraph工具交接案例演示")
+    print("展示单代理和多代理协作的数学计算系统")
+    print()
+
+    try:
+        # 演示1：单个代理
+        # demo_single_agent()
+
+        # print("\n" + "-" * 20 + "\n")
+
+        # 演示2：多代理协作
+        demo_multi_agent_collaboration()
+
+        # print("\n" + "-" * 20 + "\n")
+
+        # # 演示3：复杂协作
+        # demo_complex_collaboration()
+
+    except Exception as e:
+        print(f"运行出错: {e}")
+
+
+if __name__ == "__main__":
+    main()
+
+```
+
+交接模式采用子图作为父图的节点共享状态的方式，在当前子图无法实现的功能和能力之外将主动权移交给下一个子图处理；
+
+
+
+## 如何构建多智能体应用
+
+### 自定义主管架构（重点）
+
+先根据主管将用户任务进行分解（多个子问题），在依次指定子智能体去执行任务列表，最后由主智能体总结回复
+
+![agent__012](/Users/zhangjiewu/Desktop/docs/image/agent__012.png)
+
+
+
+``` python
+from typing import TypedDict, Literal
+from langchain.tools import tool
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage
+from langgraph.graph import MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode
+from langgraph.types import Command
+
+from settings import app_settings
+
+llm = app_settings.get_qwen_client(temperature=0.1)
+
+# 知识库: 技术问题的解决方案映射
+# Key: 问题关键词 (小写), Value: 解决方案
+KNOWLEDGE_BASE = {
+    "login": "请清除浏览器缓存并重新登录，或重置密码。",
+    "payment": "请检查银行卡余额，确认交易状态，或联系银行。",
+    "bug": "我们已记录此问题，技术团队将在24小时内处理。",
+    "network": "请检查网络连接，或尝试切换网络环境。",
+    "performance": "建议清理缓存、重启应用或检查系统资源使用情况。"
+}
+
+# 产品列表: 产品ID -> 产品信息
+# 包含名称、价格、功能列表
+PRODUCTS = {
+    "basic": {"name": "基础版", "price": 99, "features": ["基础功能", "邮件支持"]},
+    "pro": {"name": "专业版", "price": 299, "features": ["高级功能", "优先支持", "API访问"]},
+    "enterprise": {"name": "企业版", "price": 999, "features": ["企业功能", "专属客服", "定制开发"]}
+}
+
+# 用户数据库: 用户ID -> 用户信息
+# 包含套餐、状态、支持级别、余额
+USER_DATABASE = {
+    "user123": {"plan": "pro", "status": "active", "support_level": "premium", "balance": 500},
+    "user456": {"plan": "basic", "status": "active", "support_level": "standard", "balance": 100}
+}
+
+
+# ==============================================================================
+# 工具定义 (使用 @tool 装饰器)
+# ==============================================================================
+
+# ----------------------------------------------------------------------
+# 技术支持工具 (tech_agent 使用)
+# ----------------------------------------------------------------------
+
+@tool
+def search_knowledge_base(query: str) -> str:
+    """
+    搜索技术知识库，查找解决方案
+
+    Args:
+        query: 用户的问题描述
+
+    Returns:
+        str: 从知识库中找到的解决方案，或提示创建工单
+    """
+    print(f"[Tech] 搜索知识库: {query}")
+
+    # 将查询转为小写进行匹配
+    query_lower = query.lower()
+    results = []
+
+    # 遍历知识库，查找匹配的问题
+    for issue, solution in KNOWLEDGE_BASE.items():
+        if issue in query_lower:
+            results.append(f"{issue}: {solution}")
+
+    # 如果找到匹配项，返回所有解决方案
+    if results:
+        return "找到以下解决方案:\n" + "\n".join(results)
+
+    # 未找到匹配，返回创建工单提示
+    return "未在知识库中找到相关解决方案，建议创建技术工单进行人工处理。"
+
+
+# ----------------------------------------------------------------------
+# 技术支持工具: 创建工单 (tech_agent 使用)
+# ----------------------------------------------------------------------
+
+@tool
+def create_support_ticket(issue_description: str, priority: str = "normal") -> str:
+    """
+    创建技术支持工单
+
+    Args:
+        issue_description: 问题描述
+        priority: 优先级 (normal/high/urgent)
+
+    Returns:
+        str: 工单创建成功信息，包含工单ID
+    """
+    import uuid
+
+    # 生成唯一工单ID: TICKET-XXXXXXXX 格式
+    ticket_id = f"TICKET-{str(uuid.uuid4())[:8].upper()}"
+    print(f"[Tech] 创建工单: {ticket_id}")
+
+    return f"已创建支持工单: {ticket_id}\n问题描述: {issue_description}\n优先级: {priority}\n我们的技术团队将在24小时内处理您的问题。"
+
+
+# ----------------------------------------------------------------------
+# 销售工具: 获取产品信息 (sales_agent 使用)
+# ----------------------------------------------------------------------
+
+@tool
+def get_product_info(product_query: str = "") -> str:
+    """
+    获取产品信息和价格
+
+    Args:
+        product_query: 产品查询词（可选），支持产品ID或名称
+
+    Returns:
+        str: 产品信息列表，包含价格和功能
+    """
+    print(f"[Sales] 查询产品: {product_query or '全部'}")
+
+    # 如果没有指定查询词，返回所有产品
+    if not product_query:
+        result = "我们的产品线包括:\n\n"
+        for key, product in PRODUCTS.items():
+            result += f"**{product['name']}** - ¥{product['price']}/月\n"
+            result += f"功能: {', '.join(product['features'])}\n\n"
+        return result
+
+    # 根据查询词查找匹配的产品
+    query_lower = product_query.lower()
+    for key, product in PRODUCTS.items():
+        if key in query_lower or product["name"] in query_lower:
+            return (
+                f"**{product['name']}**\n"
+                f"价格: ¥{product['price']}/月\n"
+                f"功能: {', '.join(product['features'])}"
+            )
+
+    return f"未找到关于'{product_query}'的产品信息。请查看我们的完整产品列表。"
+
+
+# ----------------------------------------------------------------------
+# 销售工具: 计算升级费用 (sales_agent 使用)
+# ----------------------------------------------------------------------
+
+@tool
+def calculate_upgrade_cost(current_plan: str, target_plan: str) -> str:
+    """
+    计算升级费用
+
+    Args:
+        current_plan: 当前套餐ID
+        target_plan: 目标套餐ID
+
+    Returns:
+        str: 升级费用计算结果，包含新增功能列表
+    """
+    print(f"[Sales] 计算升级: {current_plan} -> {target_plan}")
+
+    # 验证套餐ID有效性
+    if current_plan not in PRODUCTS or target_plan not in PRODUCTS:
+        return "无效的套餐类型。请检查套餐名称。"
+
+    # 获取当前和目标套餐的价格
+    current_price = PRODUCTS[current_plan]["price"]
+    target_price = PRODUCTS[target_plan]["price"]
+
+    # 如果目标价格不高于当前价格，无需升级费用
+    if target_price <= current_price:
+        return (
+            f"目标套餐 ({PRODUCTS[target_plan]['name']}) "
+            f"价格不高于当前套餐 ({PRODUCTS[current_plan]['name']})，无需升级费用。"
+        )
+
+    # 计算升级费用
+    upgrade_cost = target_price - current_price
+
+    # 计算新增功能
+    new_features = set(PRODUCTS[target_plan]["features"]) - set(PRODUCTS[current_plan]["features"])
+
+    return (
+        f"升级费用计算:\n"
+        f"当前套餐: {PRODUCTS[current_plan]['name']} (¥{current_price}/月)\n"
+        f"目标套餐: {PRODUCTS[target_plan]['name']} (¥{target_price}/月)\n"
+        f"升级费用: ¥{upgrade_cost}/月\n\n"
+        f"新增功能: {', '.join(new_features)}"
+    )
+
+
+# ----------------------------------------------------------------------
+# 管理工具: 查询账户信息 (admin_agent 使用)
+# ----------------------------------------------------------------------
+
+@tool
+def get_user_account_info(user_id: str) -> str:
+    """
+    查询用户账户信息
+
+    Args:
+        user_id: 用户ID
+
+    Returns:
+        str: 用户账户详细信息
+    """
+    print(f"[Admin] 查询账户: {user_id}")
+
+    # 验证用户ID是否提供
+    if not user_id:
+        return "请提供您的用户ID以查询账户信息。"
+
+    # 从数据库查找用户
+    if user_id in USER_DATABASE:
+        user_info = USER_DATABASE[user_id]
+        return (
+            f"账户信息:\n"
+            f"用户ID: {user_id}\n"
+            f"当前套餐: {user_info['plan']}\n"
+            f"账户状态: {user_info['status']}\n"
+            f"支持级别: {user_info['support_level']}\n"
+            f"账户余额: ¥{user_info['balance']}"
+        )
+
+    return f"未找到用户ID '{user_id}' 的账户信息。"
+
+
+# ----------------------------------------------------------------------
+# 管理工具: 处理退款请求 (admin_agent 使用)
+# ----------------------------------------------------------------------
+
+@tool
+def process_refund_request(user_id: str, reason: str) -> str:
+    """
+    处理退款请求
+
+    Args:
+        user_id: 用户ID
+        reason: 退款原因
+
+    Returns:
+        str: 退款申请结果
+    """
+    print(f"[Admin] 处理退款: {user_id}")
+
+    # 验证用户ID有效性
+    if not user_id or user_id not in USER_DATABASE:
+        return "请提供有效的用户ID以处理退款请求。"
+
+    user_info = USER_DATABASE[user_id]
+
+    # 检查账户状态
+    if user_info["status"] != "active":
+        return "只有活跃账户才能申请退款。"
+
+    # 计算退款金额（按月费计算）
+    refund_amount = PRODUCTS[user_info["plan"]]["price"]
+
+    return (
+        f"退款申请已提交:\n"
+        f"用户ID: {user_id}\n"
+        f"退款原因: {reason}\n"
+        f"退款金额: ¥{refund_amount}\n"
+        f"处理时间: 3-5个工作日\n"
+        f"退款将原路返回到您的支付账户。"
+    )
+
+
+# ==============================================================================
+# 创建子图 (每个子Agent一个子图)
+# ==============================================================================
+
+# ----------------------------------------------------------------------
+# 子图1: 技术支持 Agent
+# 负责处理: 报错、bug、故障、登录问题、网络问题等
+# ----------------------------------------------------------------------
+
+def create_tech_agent_subgraph():
+    """
+    创建技术支持Agent子图
+
+    子图结构:
+        START -> tech_model -> (tools_condition) -> tech_tools -> tech_model -> END
+                                    |
+                                    v
+                                   END (无工具调用时)
+
+    工具:
+        - search_knowledge_base: 搜索知识库
+        - create_support_ticket: 创建工单
+
+    Returns:
+        Compiled graph: 编译后的子图，可被主图调用
+    """
+
+    # 定义该子图使用的工具列表
+    tech_tools = [search_knowledge_base, create_support_ticket]
+
+    # 定义 LLM 调用节点
+    # 功能: 调用 LLM，让 LLM 决定是否需要调用工具
+    def tech_model_node(state: MessagesState):
+        """
+        技术Agent的模型节点
+
+        Args:
+            state: 包含消息历史的状态
+
+        Returns:
+            dict: 更新后的状态，包含 LLM 响应
+        """
+        print("[Tech] LLM 决策...")
+
+        # 系统提示词：指导 LLM 如何使用工具
+        system_message = SystemMessage(content="""
+        你是技术支持助手，专注解决技术问题。
+
+        **工作流程**：
+        1. 优先调用 search_knowledge_base 查找已知解决方案。
+        2. 若知识库有答案 → 直接回复用户。
+        3. 若知识库无答案 → 调用 create_support_ticket 创建工单，并告知用户工单 ID 和预计响应时间。
+
+        **职责边界**：
+        - ✅ 报错、Bug、登录失败、网络问题、性能问题
+        - ❌ 价格咨询、账户余额、退款申请
+
+        **交互原则**：
+        - 回答简洁明了，直接给解决方案，不重复用户问题。
+        - 若用户询问非职责内容，统一回复：“关于【账户/余额/退款】问题，我会转交相关同事处理。” 随后继续技术支持。
+        """)
+        # 使用系统提示词 + 用户消息
+        messages = [system_message] + state["messages"]
+        ai_message = llm.bind_tools(tech_tools).invoke(messages)
+        return Command(
+            update={"messages": [ai_message]},
+            goto="tech_tools" if ai_message.tool_calls else "__end__",
+        )
+
+    # 创建状态图
+    builder = StateGraph(MessagesState)
+
+    # 添加节点:
+    # 1. tech_model: LLM 决策节点
+    # 2. tech_tools: 工具执行节点 (由 ToolNode 自动处理工具调用)
+    builder.add_node("tech_model", tech_model_node)
+    builder.add_node("tech_tools", ToolNode(tech_tools))
+
+    # 添加边:
+    # 1. START -> tech_model: 起点到 LLM 节点
+    builder.set_entry_point("tech_model")
+
+    # 3. tech_tools -> tech_model: 工具执行完后返回 LLM 形成循环
+    builder.add_edge("tech_tools", "tech_model")
+
+    return builder.compile()
+
+
+# ----------------------------------------------------------------------
+# 子图2: 销售 Agent
+# 负责处理: 价格咨询、套餐升级、产品信息、购买咨询等
+# ----------------------------------------------------------------------
+
+def create_sales_agent_subgraph():
+    """
+    创建销售Agent子图
+
+    工具:
+        - get_product_info: 获取产品信息
+        - calculate_upgrade_cost: 计算升级费用
+
+    子图结构与 Tech Agent 相同
+    """
+    sales_tools = [get_product_info, calculate_upgrade_cost]
+
+    def sales_model_node(state: MessagesState):
+        print("[Sales] LLM 决策...")
+        # 添加专业的销售系统提示词
+        system_message = SystemMessage(content="""
+        你是销售顾问，专注产品销售与方案推荐。
+
+        **可用工具**：
+        - get_product_info：获取产品功能、价格
+        - calculate_upgrade_cost：计算套餐升级费用
+
+        **职责边界**：
+        - ✅ 产品介绍、价格咨询、套餐推荐、促销活动
+        - ❌ 账户余额、退款、技术故障
+
+        **交互原则**：
+        - 先了解用户需求，再推荐合适产品，诚实专业不夸大。
+        - 若用户询问非职责内容，统一回复：“关于【账户/余额/退款/技术】问题，我会转交相关同事处理。” 随后继续销售咨询。
+        """)
+
+        # 将系统消息添加到消息列表（放在最前面）
+        messages = [system_message] + state["messages"]
+
+        ai_message = llm.bind_tools(sales_tools).invoke(messages)
+        return Command(
+            update={"messages": [ai_message]},
+            goto="sales_tools" if ai_message.tool_calls else "__end__",
+        )
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("sales_model", sales_model_node)
+    builder.add_node("sales_tools", ToolNode(sales_tools))
+    builder.set_entry_point("sales_model")
+    builder.add_edge("sales_tools", "sales_model")
+
+    return builder.compile()
+
+
+# ----------------------------------------------------------------------
+# 子图3: 客户管理 Agent
+# 负责处理: 余额查询、账户信息、退款申请等
+# ----------------------------------------------------------------------
+
+def create_admin_agent_subgraph():
+    """
+    创建客户管理Agent子图
+
+    工具:
+        - get_user_account_info: 查询账户信息
+        - process_refund_request: 处理退款
+
+    子图结构与 Tech Agent 相同
+    """
+    admin_tools = [get_user_account_info, process_refund_request]
+
+    def admin_model_node(state: MessagesState):
+        print("[Admin] LLM 决策...")
+        # 添加系统提示，明确市场功能
+        system_message = SystemMessage(content="""
+        你是账户管理助手，仅处理账户与支付相关事务。
+
+        **可用工具**：
+        - get_user_account_info：查询余额、账户状态
+        - process_refund_request：处理退款申请
+
+        **职责边界**：
+        - ✅ 账户信息查询、余额、退款
+        - ❌ 产品介绍、价格咨询、技术问题、升级费用
+
+        **交互原则**：
+        - 先确认用户需求，再调用工具，一次性提供清晰结果。
+        - 若用户询问非职责内容，统一回复：“关于【产品/技术】问题，我会转交相关同事处理。” 随后继续处理账户问题。
+        """)
+
+        # 将系统消息添加到消息列表
+        messages = [system_message] + state["messages"]
+
+        ai_message = llm.bind_tools(admin_tools).invoke(messages)
+        return Command(
+            update={"messages": [ai_message]},
+            goto="admin_tools" if ai_message.tool_calls else "__end__",
+        )
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("admin_model", admin_model_node)
+    builder.add_node("admin_tools", ToolNode(admin_tools))
+
+    builder.set_entry_point("admin_model")
+    builder.add_edge("admin_tools", "admin_model")
+
+    return builder.compile()
+
+
+def supervisor_graph():
+    """
+    创建主管Graph - 协调所有子Agent的任务
+
+    复杂问题示例: "我想了解专业版的价格，另外查一下我的余额"
+    - 涉及: 销售问题(价格) + 管理问题(余额)
+    - 需要循环调用: supervisor -> sales -> supervisor -> admin -> supervisor -> END
+
+    主管状态 (SupervisorState):
+        - messages: 消息列表 (从 MessagesState 继承)
+        - pending_tasks: 待处理任务队列 ['tech', 'sales', 'admin']
+        - completed_tasks: 已完成任务列表
+        - current_agent: 当前正在执行的 Agent
+
+    Returns:
+        Compiled graph: 编译后的主管图
+    """
+
+    # 定义主管状态类型
+    # 继承 MessagesState，获得 messages 通道和 add_messages reducer
+
+    class SupervisorState(MessagesState):
+        """
+        主管状态: 包含消息和任务追踪信息
+
+        Attributes:
+            current: 当前执行的 Agent 名称
+            pending: 待处理的任务队列 (关键！用于循环协调)
+            completed: 已完成的任务列表
+            next: 下一个要执行的 Agent 名称（由 supervisor_node 设置）
+        """
+        current: str
+        pending: list[str]
+        completed: list[str]
+        next: str | None
+
+    tech_subgraph = create_tech_agent_subgraph()
+    sales_subgraph = create_sales_agent_subgraph()
+    admin_subgraph = create_admin_agent_subgraph()
+
+    def supervisor_node(state: SupervisorState) -> Command[
+        Literal["tech_agent", "sales_agent", "admin_agent", "__end__"]]:
+        """
+        主管节点 - 负责任务识别和分配
+
+        工作流程:
+            1. 如果有待处理任务(pending)，取出第一个任务执行
+            2. 如果没有待处理任务（首次），使用 LLM 做意图识别
+            3. 将所有识别的任务填入 pending（除第一个外）
+            4. 返回第一个任务名称
+
+        关键改进: 使用 LLM 做意图识别，不再用关键词匹配
+
+        Args:
+            state: 当前状态
+
+        Returns:
+            Command[
+        Literal["tech_agent", "sales_agent", "admin_agent", "__end__"]]: 状态更新，包含 pending 和 next
+        """
+        # 待处理的任务队列
+        pending = state.get("pending", [])
+        # 已完成的任务队列
+        # completed = state.get("completed", [])
+        # 当前消息列表
+        messages = state["messages"]
+        # 最后一条消息
+        last_msg = messages[-1] if messages else None
+
+        print(pending)
+
+        # ========== 情况1: 还有待处理任务，从队列取第一个执行 ==========
+        if pending:
+            return Command(
+                update={
+                    "pending": pending[1:],
+                    "next": pending[0]  # 标记下一个要执行的 Agent
+                },
+                goto=pending[0]
+            )
+
+        # ========== 情况2: 没有待处理任务，使用提示词做 LLM 意图识别 ==========
+        if isinstance(last_msg, HumanMessage):
+            # 结构化输出，指定输出格式为 OutputRouting
+            with_llm = llm.with_structured_output(schema=OutputRouting)
+            # 调用 LLM 获取意图识别结果
+            response = with_llm.invoke(routing_prompt(last_msg.content))
+
+            # 解析 LLM 返回的 Agent 列表
+            new_tasks = response.get("new_tasks", [])
+
+            print(new_tasks)
+
+            if new_tasks:
+                print(f"[Supervisor] LLM 识别到任务: {new_tasks}")
+                new_task = new_tasks[0]
+                goto_node = new_task if new_task in ["tech_agent", "sales_agent", "admin_agent"] else None
+                if goto_node is not None:
+                    return Command(
+                        update={"pending": new_tasks[1:], "next": goto_node},
+                        goto=goto_node,
+                    )
+                else:
+                    return Command(
+                        update={"pending": [], "next": None},
+                        goto="__end__",
+                    )
+
+        # ========== 情况3: 没有新任务 ==========
+        print("\n[Supervisor] 所有任务已完成，结束对话")
+        return Command(
+            update={"pending": [], "next": None, },
+            goto="__end__",
+        )
+
+    def tech_agent_node(state: SupervisorState) -> dict:
+        """
+        技术支持节点 - 处理技术问题
+
+        Args:
+            state: 当前状态
+
+        Returns:
+            dict: 状态更新
+        """
+        pending = state.get("pending", [])
+        # print("sales pending:", pending)
+
+        completed = state.get("completed", [])
+        # print("sales completed:", completed)
+
+        result = tech_subgraph.invoke({"messages": state["messages"]})
+
+        return {
+            "pending": pending,
+            "completed": [*completed, "tech_agent"],
+            # "messages": [AIMessage(content="技术问题已处理，24内相关技术人员处理完毕后联系")]
+            "messages": result["messages"],
+        }
+
+    def sales_agent_node(state: SupervisorState) -> dict:
+        """
+        调用销售子Agent
+
+        执行流程与 call_tech_agent 相同
+        """
+        pending = state.get("pending", [])
+        # print("sales pending:", pending)
+
+        completed = state.get("completed", [])
+        # print("sales completed:", completed)
+
+        result = sales_subgraph.invoke({"messages": state["messages"]})
+        return {
+            "pending": pending,
+            "completed": [*completed, "sales_agent"],
+            "messages": result["messages"],
+        }
+
+    def admin_agent_node(state: SupervisorState) -> dict:
+        """
+        调用客户管理子Agent
+
+        执行流程与 call_tech_agent 相同
+        """
+        pending = state.get("pending", [])
+        # print("admin pending:", pending)
+
+        completed = state.get("completed", [])
+        # print("admin completed:", completed)
+        result = admin_subgraph.invoke({"messages": state["messages"]})
+        return {
+            "pending": pending,
+            "completed": [*completed, "admin_agent"],
+            "messages": result["messages"],
+        }
+
+    # 创建主管图
+    builder = StateGraph(state_schema=SupervisorState)
+
+    # 添加所有节点
+    builder.add_node("supervisor", supervisor_node)
+    builder.add_node("tech_agent", tech_agent_node)
+    builder.add_node("sales_agent", sales_agent_node)
+    builder.add_node("admin_agent", admin_agent_node)
+
+    builder.set_entry_point("supervisor")
+
+    builder.add_edge("tech_agent", "supervisor")
+    builder.add_edge("sales_agent", "supervisor")
+    builder.add_edge("admin_agent", "supervisor")
+
+    return builder.compile()
+
+
+class OutputRouting(TypedDict):
+    new_tasks: list[str]
+
+
+# 意图识别提示词
+def routing_prompt(content):
+    return f"""你是意图识别专家。根据用户消息，判断需调用的 Agent 类型，并按处理顺序返回 Agent 名称列表（最多3个）。
+
+**Agent 类型**：
+- tech_agent：技术支持（报错、bug、故障、登录/网络/性能问题、技术咨询等）
+- sales_agent：销售服务（价格、套餐、产品信息、购买咨询、升级费用等）
+- admin_agent：账户管理（余额查询、账户信息、退款申请、账户状态等）
+
+**决策原则**：
+1. 若用户问题涉及多个领域，按“先诊断后处理”或“先咨询后操作”的顺序排列。
+2. 若问题明显属于单一领域，只返回该 Agent。
+3. 若无法确定，优先选择最相关的 Agent，避免过度调用。
+
+用户消息：{content}
+
+请直接返回 Agent 名称列表（Python 字符串列表格式），例如：["tech_agent", "sales_agent"]。"""
+
+
+def examples():
+    """
+    运行测试示例
+
+    测试场景:
+        1. 技术问题: 登录 + 报错
+        2. 销售问题: 产品价格咨询
+        3. 管理问题: 账户余额查询
+        4. 混合问题(循环协调): 价格 + 余额查询 - 需要多次循环协调
+    """
+
+    # 定义测试用例
+    test_cases = [
+        # {"message": "我的应用登录有问题，显示error 500"},
+        # {"message": "我想了解专业版的价格"},
+        # {"message": "查询一下我的余额，用户ID是user123"},
+        {
+            "message": "我的应用登录有问题，显示error 500，另外我想了解专业版的价格。我的用户ID是user123帮我查询一下我的余额"},
+        # 复杂多任务
+    ]
+
+    graph = supervisor_graph()
+
+    initial_state = {
+        "messages": [
+            HumanMessage(content=test_cases[0].get("message", ""))
+        ],
+        "current": "supervisor",
+        "pending": [],
+        "completed": [],
+        "next": None
+    }
+
+    result = graph.invoke(initial_state)
+    print()
+    print()
+    print()
+    print()
+    print()
+    print('////////' * 10)
+    for msg in result["messages"]:
+        msg.pretty_print()
+
+
+if __name__ == '__main__':
+    examples()
+
+```
+
+
+
+#### Send并发
+
+``` python
+from typing import TypedDict, Literal, Annotated
+from langchain.tools import tool
+from langchain_core.messages import HumanMessage, SystemMessage, AIMessage, AnyMessage
+from langgraph.graph import MessagesState, StateGraph
+from langgraph.prebuilt import ToolNode
+from langgraph.types import Command, Send
+from operator import add
+
+from settings import app_settings
+
+llm = app_settings.get_qwen_client(temperature=0.1)
+
+# 知识库: 技术问题的解决方案映射
+# Key: 问题关键词 (小写), Value: 解决方案
+KNOWLEDGE_BASE = {
+    "login": "请清除浏览器缓存并重新登录，或重置密码。",
+    "payment": "请检查银行卡余额，确认交易状态，或联系银行。",
+    "bug": "我们已记录此问题，技术团队将在24小时内处理。",
+    "network": "请检查网络连接，或尝试切换网络环境。",
+    "performance": "建议清理缓存、重启应用或检查系统资源使用情况。"
+}
+
+# 产品列表: 产品ID -> 产品信息
+# 包含名称、价格、功能列表
+PRODUCTS = {
+    "basic": {"name": "基础版", "price": 99, "features": ["基础功能", "邮件支持"]},
+    "pro": {"name": "专业版", "price": 299, "features": ["高级功能", "优先支持", "API访问"]},
+    "enterprise": {"name": "企业版", "price": 999, "features": ["企业功能", "专属客服", "定制开发"]}
+}
+
+# 用户数据库: 用户ID -> 用户信息
+# 包含套餐、状态、支持级别、余额
+USER_DATABASE = {
+    "user123": {"plan": "pro", "status": "active", "support_level": "premium", "balance": 500},
+    "user456": {"plan": "basic", "status": "active", "support_level": "standard", "balance": 100}
+}
+
+
+# ==============================================================================
+# 工具定义 (使用 @tool 装饰器)
+# ==============================================================================
+
+# ----------------------------------------------------------------------
+# 技术支持工具 (tech_agent 使用)
+# ----------------------------------------------------------------------
+
+@tool
+def search_knowledge_base(query: str) -> str:
+    """
+    搜索技术知识库，查找解决方案
+
+    Args:
+        query: 用户的问题描述
+
+    Returns:
+        str: 从知识库中找到的解决方案，或提示创建工单
+    """
+    print(f"[Tech] 搜索知识库: {query}")
+
+    # 将查询转为小写进行匹配
+    query_lower = query.lower()
+    results = []
+
+    # 遍历知识库，查找匹配的问题
+    for issue, solution in KNOWLEDGE_BASE.items():
+        if issue in query_lower:
+            results.append(f"{issue}: {solution}")
+
+    # 如果找到匹配项，返回所有解决方案
+    if results:
+        return "找到以下解决方案:\n" + "\n".join(results)
+
+    # 未找到匹配，返回创建工单提示
+    return "未在知识库中找到相关解决方案，建议创建技术工单进行人工处理。"
+
+
+# ----------------------------------------------------------------------
+# 技术支持工具: 创建工单 (tech_agent 使用)
+# ----------------------------------------------------------------------
+
+@tool
+def create_support_ticket(issue_description: str, priority: str = "normal") -> str:
+    """
+    创建技术支持工单
+
+    Args:
+        issue_description: 问题描述
+        priority: 优先级 (normal/high/urgent)
+
+    Returns:
+        str: 工单创建成功信息，包含工单ID
+    """
+    import uuid
+
+    # 生成唯一工单ID: TICKET-XXXXXXXX 格式
+    ticket_id = f"TICKET-{str(uuid.uuid4())[:8].upper()}"
+    print(f"[Tech] 创建工单: {ticket_id}")
+
+    return f"已创建支持工单: {ticket_id}\n问题描述: {issue_description}\n优先级: {priority}\n我们的技术团队将在24小时内处理您的问题。"
+
+
+# ----------------------------------------------------------------------
+# 销售工具: 获取产品信息 (sales_agent 使用)
+# ----------------------------------------------------------------------
+
+@tool
+def get_product_info(product_query: str = "") -> str:
+    """
+    获取产品信息和价格
+
+    Args:
+        product_query: 产品查询词（可选），支持产品ID或名称
+
+    Returns:
+        str: 产品信息列表，包含价格和功能
+    """
+    print(f"[Sales] 查询产品: {product_query or '全部'}")
+
+    # 如果没有指定查询词，返回所有产品
+    if not product_query:
+        result = "我们的产品线包括:\n\n"
+        for key, product in PRODUCTS.items():
+            result += f"**{product['name']}** - ¥{product['price']}/月\n"
+            result += f"功能: {', '.join(product['features'])}\n\n"
+        return result
+
+    # 根据查询词查找匹配的产品
+    query_lower = product_query.lower()
+    for key, product in PRODUCTS.items():
+        if key in query_lower or product["name"] in query_lower:
+            return (
+                f"**{product['name']}**\n"
+                f"价格: ¥{product['price']}/月\n"
+                f"功能: {', '.join(product['features'])}"
+            )
+
+    return f"未找到关于'{product_query}'的产品信息。请查看我们的完整产品列表。"
+
+
+# ----------------------------------------------------------------------
+# 销售工具: 计算升级费用 (sales_agent 使用)
+# ----------------------------------------------------------------------
+
+@tool
+def calculate_upgrade_cost(current_plan: str, target_plan: str) -> str:
+    """
+    计算升级费用
+
+    Args:
+        current_plan: 当前套餐ID
+        target_plan: 目标套餐ID
+
+    Returns:
+        str: 升级费用计算结果，包含新增功能列表
+    """
+    print(f"[Sales] 计算升级: {current_plan} -> {target_plan}")
+
+    # 验证套餐ID有效性
+    if current_plan not in PRODUCTS or target_plan not in PRODUCTS:
+        return "无效的套餐类型。请检查套餐名称。"
+
+    # 获取当前和目标套餐的价格
+    current_price = PRODUCTS[current_plan]["price"]
+    target_price = PRODUCTS[target_plan]["price"]
+
+    # 如果目标价格不高于当前价格，无需升级费用
+    if target_price <= current_price:
+        return (
+            f"目标套餐 ({PRODUCTS[target_plan]['name']}) "
+            f"价格不高于当前套餐 ({PRODUCTS[current_plan]['name']})，无需升级费用。"
+        )
+
+    # 计算升级费用
+    upgrade_cost = target_price - current_price
+
+    # 计算新增功能
+    new_features = set(PRODUCTS[target_plan]["features"]) - set(PRODUCTS[current_plan]["features"])
+
+    return (
+        f"升级费用计算:\n"
+        f"当前套餐: {PRODUCTS[current_plan]['name']} (¥{current_price}/月)\n"
+        f"目标套餐: {PRODUCTS[target_plan]['name']} (¥{target_price}/月)\n"
+        f"升级费用: ¥{upgrade_cost}/月\n\n"
+        f"新增功能: {', '.join(new_features)}"
+    )
+
+
+# ----------------------------------------------------------------------
+# 管理工具: 查询账户信息 (admin_agent 使用)
+# ----------------------------------------------------------------------
+
+@tool
+def get_user_account_info(user_id: str) -> str:
+    """
+    查询用户账户信息
+
+    Args:
+        user_id: 用户ID
+
+    Returns:
+        str: 用户账户详细信息
+    """
+    print(f"[Admin] 查询账户: {user_id}")
+
+    # 验证用户ID是否提供
+    if not user_id:
+        return "请提供您的用户ID以查询账户信息。"
+
+    # 从数据库查找用户
+    if user_id in USER_DATABASE:
+        user_info = USER_DATABASE[user_id]
+        return (
+            f"账户信息:\n"
+            f"用户ID: {user_id}\n"
+            f"当前套餐: {user_info['plan']}\n"
+            f"账户状态: {user_info['status']}\n"
+            f"支持级别: {user_info['support_level']}\n"
+            f"账户余额: ¥{user_info['balance']}"
+        )
+
+    return f"未找到用户ID '{user_id}' 的账户信息。"
+
+
+# ----------------------------------------------------------------------
+# 管理工具: 处理退款请求 (admin_agent 使用)
+# ----------------------------------------------------------------------
+
+@tool
+def process_refund_request(user_id: str, reason: str) -> str:
+    """
+    处理退款请求
+
+    Args:
+        user_id: 用户ID
+        reason: 退款原因
+
+    Returns:
+        str: 退款申请结果
+    """
+    print(f"[Admin] 处理退款: {user_id}")
+
+    # 验证用户ID有效性
+    if not user_id or user_id not in USER_DATABASE:
+        return "请提供有效的用户ID以处理退款请求。"
+
+    user_info = USER_DATABASE[user_id]
+
+    # 检查账户状态
+    if user_info["status"] != "active":
+        return "只有活跃账户才能申请退款。"
+
+    # 计算退款金额（按月费计算）
+    refund_amount = PRODUCTS[user_info["plan"]]["price"]
+
+    return (
+        f"退款申请已提交:\n"
+        f"用户ID: {user_id}\n"
+        f"退款原因: {reason}\n"
+        f"退款金额: ¥{refund_amount}\n"
+        f"处理时间: 3-5个工作日\n"
+        f"退款将原路返回到您的支付账户。"
+    )
+
+
+# ==============================================================================
+# 创建子图 (每个子Agent一个子图)
+# ==============================================================================
+
+# ----------------------------------------------------------------------
+# 子图1: 技术支持 Agent
+# 负责处理: 报错、bug、故障、登录问题、网络问题等
+# ----------------------------------------------------------------------
+
+def create_tech_agent_subgraph():
+    """
+    创建技术支持Agent子图
+
+    子图结构:
+        START -> tech_model -> (tools_condition) -> tech_tools -> tech_model -> END
+                                    |
+                                    v
+                                   END (无工具调用时)
+
+    工具:
+        - search_knowledge_base: 搜索知识库
+        - create_support_ticket: 创建工单
+
+    Returns:
+        Compiled graph: 编译后的子图，可被主图调用
+    """
+
+    # 定义该子图使用的工具列表
+    tech_tools = [search_knowledge_base, create_support_ticket]
+
+    # 定义 LLM 调用节点
+    # 功能: 调用 LLM，让 LLM 决定是否需要调用工具
+    def tech_model_node(state: MessagesState):
+        """
+        技术Agent的模型节点
+
+        Args:
+            state: 包含消息历史的状态
+
+        Returns:
+            dict: 更新后的状态，包含 LLM 响应
+        """
+        print("[Tech] LLM 决策...")
+
+        # 系统提示词：指导 LLM 如何使用工具
+        system_message = SystemMessage(content="""
+        你是技术支持助手，专注解决技术问题。
+
+        **工作流程**：
+        1. 优先调用 search_knowledge_base 查找已知解决方案。
+        2. 若知识库有答案 → 直接回复用户。
+        3. 若知识库无答案 → 调用 create_support_ticket 创建工单，并告知用户工单 ID 和预计响应时间。
+
+        **职责边界**：
+        - ✅ 报错、Bug、登录失败、网络问题、性能问题
+        - ❌ 价格咨询、账户余额、退款申请
+
+        **交互原则**：
+        - 回答简洁明了，直接给解决方案，不重复用户问题。
+        - 若用户询问非职责内容，统一回复：“关于【账户/余额/退款】问题，我会转交相关同事处理。” 随后继续技术支持。
+        """)
+        # 使用系统提示词 + 用户消息
+        messages = [system_message] + state["messages"]
+        ai_message = llm.bind_tools(tech_tools).invoke(messages)
+        return Command(
+            update={"messages": [ai_message]},
+            goto="tech_tools" if ai_message.tool_calls else "__end__",
+        )
+
+    # 创建状态图
+    builder = StateGraph(MessagesState)
+
+    # 添加节点:
+    # 1. tech_model: LLM 决策节点
+    # 2. tech_tools: 工具执行节点 (由 ToolNode 自动处理工具调用)
+    builder.add_node("tech_model", tech_model_node)
+    builder.add_node("tech_tools", ToolNode(tech_tools))
+
+    # 添加边:
+    # 1. START -> tech_model: 起点到 LLM 节点
+    builder.set_entry_point("tech_model")
+
+    # 3. tech_tools -> tech_model: 工具执行完后返回 LLM 形成循环
+    builder.add_edge("tech_tools", "tech_model")
+
+    return builder.compile()
+
+
+# ----------------------------------------------------------------------
+# 子图2: 销售 Agent
+# 负责处理: 价格咨询、套餐升级、产品信息、购买咨询等
+# ----------------------------------------------------------------------
+
+def create_sales_agent_subgraph():
+    """
+    创建销售Agent子图
+
+    工具:
+        - get_product_info: 获取产品信息
+        - calculate_upgrade_cost: 计算升级费用
+
+    子图结构与 Tech Agent 相同
+    """
+    sales_tools = [get_product_info, calculate_upgrade_cost]
+
+    def sales_model_node(state: MessagesState):
+        print("[Sales] LLM 决策...")
+        # 添加专业的销售系统提示词
+        system_message = SystemMessage(content="""
+        你是销售顾问，专注产品销售与方案推荐。
+
+        **可用工具**：
+        - get_product_info：获取产品功能、价格
+        - calculate_upgrade_cost：计算套餐升级费用
+
+        **职责边界**：
+        - ✅ 产品介绍、价格咨询、套餐推荐、促销活动
+        - ❌ 账户余额、退款、技术故障
+
+        **交互原则**：
+        - 先了解用户需求，再推荐合适产品，诚实专业不夸大。
+        - 若用户询问非职责内容，统一回复：“关于【账户/余额/退款/技术】问题，我会转交相关同事处理。” 随后继续销售咨询。
+        """)
+
+        # 将系统消息添加到消息列表（放在最前面）
+        messages = [system_message] + state["messages"]
+
+        ai_message = llm.bind_tools(sales_tools).invoke(messages)
+        return Command(
+            update={"messages": [ai_message]},
+            goto="sales_tools" if ai_message.tool_calls else "__end__",
+        )
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("sales_model", sales_model_node)
+    builder.add_node("sales_tools", ToolNode(sales_tools))
+    builder.set_entry_point("sales_model")
+    builder.add_edge("sales_tools", "sales_model")
+
+    return builder.compile()
+
+
+# ----------------------------------------------------------------------
+# 子图3: 客户管理 Agent
+# 负责处理: 余额查询、账户信息、退款申请等
+# ----------------------------------------------------------------------
+
+def create_admin_agent_subgraph():
+    """
+    创建客户管理Agent子图
+
+    工具:
+        - get_user_account_info: 查询账户信息
+        - process_refund_request: 处理退款
+
+    子图结构与 Tech Agent 相同
+    """
+    admin_tools = [get_user_account_info, process_refund_request]
+
+    def admin_model_node(state: MessagesState):
+        print("[Admin] LLM 决策...")
+        # 添加系统提示，明确市场功能
+        system_message = SystemMessage(content="""
+        你是账户管理助手，仅处理账户与支付相关事务。
+
+        **可用工具**：
+        - get_user_account_info：查询余额、账户状态
+        - process_refund_request：处理退款申请
+
+        **职责边界**：
+        - ✅ 账户信息查询、余额、退款
+        - ❌ 产品介绍、价格咨询、技术问题、升级费用
+
+        **交互原则**：
+        - 先确认用户需求，再调用工具，一次性提供清晰结果。
+        - 若用户询问非职责内容，统一回复：“关于【产品/技术】问题，我会转交相关同事处理。” 随后继续处理账户问题。
+        """)
+
+        # 将系统消息添加到消息列表
+        messages = [system_message] + state["messages"]
+
+        ai_message = llm.bind_tools(admin_tools).invoke(messages)
+        return Command(
+            update={"messages": [ai_message]},
+            goto="admin_tools" if ai_message.tool_calls else "__end__",
+        )
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("admin_model", admin_model_node)
+    builder.add_node("admin_tools", ToolNode(admin_tools))
+
+    builder.set_entry_point("admin_model")
+    builder.add_edge("admin_tools", "admin_model")
+
+    return builder.compile()
+
+
+def supervisor_graph():
+    """
+    创建主管Graph - 协调所有子Agent的任务
+
+    复杂问题示例: "我想了解专业版的价格，另外查一下我的余额"
+    - 涉及: 销售问题(价格) + 管理问题(余额)
+    - 需要循环调用: supervisor -> sales -> supervisor -> admin -> supervisor -> END
+
+    主管状态 (SupervisorState):
+        - messages: 消息列表 (从 MessagesState 继承)
+        - pending_tasks: 待处理任务队列 ['tech', 'sales', 'admin']
+        - completed_tasks: 已完成任务列表
+        - current_agent: 当前正在执行的 Agent
+
+    Returns:
+        Compiled graph: 编译后的主管图
+    """
+
+    # 定义主管状态类型
+    # 继承 MessagesState，获得 messages 通道和 add_messages reducer
+
+    class SupervisorState(MessagesState):
+        """
+        主管状态: 包含消息和任务追踪信息
+
+        Attributes:
+            tasks: 任务队列
+            completed_tasks: 已完成的任务列表
+        """
+        tasks: list[str]
+        completed_tasks: Annotated[list[str], add]
+
+    tech_subgraph = create_tech_agent_subgraph()
+    sales_subgraph = create_sales_agent_subgraph()
+    admin_subgraph = create_admin_agent_subgraph()
+
+    class WorkerState(TypedDict):
+        task: str
+
+    def supervisor_node(state: SupervisorState) -> Command[
+        Literal["tech_agent", "sales_agent", "admin_agent", "__end__"]]:
+
+        # 获取任务队列和已完成任务列表
+        tasks = state.get("tasks", [])
+        # 获取已完成任务列表
+        completed_tasks = state.get("completed_tasks", [])
+        # 获取最后一条消息
+        last_msg = state["messages"][-1] if state["messages"] else None
+
+        # 首次用户输入（HumanMessage）→ 识别并并发分发
+        if isinstance(last_msg, HumanMessage):
+            with_llm = llm.with_structured_output(schema=OutputRouting)
+            response = with_llm.invoke(routing_prompt(last_msg.content))
+            new_tasks = response.get("tasks", {})
+            if new_tasks:
+                # 并发启动所有子 Agent
+                return Command(
+                    update={"tasks": list(new_tasks.keys())},
+                    goto=[
+                        Send(node_name, WorkerState(task=task_content))
+                        for node_name, task_content in new_tasks.items()
+                    ]
+                )
+            else:
+                # 无任务直接结束
+                return Command(goto="__end__")
+
+        # 子 Agent 完成后的回调
+        # 检查是否所有任务已完成
+        if tasks and set(completed_tasks) == set(tasks):
+            # 全部完成 → 生成摘要并结束
+            summary_content = llm.invoke(summarize_conversation(state["messages"])).content
+            return Command(
+                update={
+                    "messages": [*state["messages"], AIMessage(content=summary_content)],
+                    "tasks": [],
+                    "completed_tasks": [],
+                },
+                goto="__end__"
+            )
+        else:
+            # 还有未完成的任务，直接结束当前分支（主管等待其他分支）
+            return Command(goto="__end__")
+
+    def summarize_conversation(messages: list[AnyMessage]) -> str:
+        """
+        将 LangGraph 消息列表转换为可读性高的对话摘要
+        """
+        # 1. 构建结构化文本
+        lines = []
+        for msg in messages:
+            if msg.type == "human":
+                lines.append(f"用户: {msg.content}")
+            elif msg.type == "ai":
+                # 如果有工具调用，显示调用内容
+                if hasattr(msg, "tool_calls") and msg.tool_calls:
+                    for tc in msg.tool_calls:
+                        lines.append(f"AI调用工具 {tc['name']}，参数: {tc['args']}")
+                else:
+                    # 普通回复
+                    lines.append(f"AI: {msg.content}")
+            elif msg.type == "tool":
+                # 工具返回结果
+                lines.append(f"工具 {msg.name} 返回: {msg.content}")
+            else:
+                # 其他类型（system等）忽略或保留
+                pass
+
+        chat_history = "\n".join(lines)
+
+        # 2. 调用 LLM 生成简洁摘要
+        prompt = f"""请总结以下对话的核心问题、处理过程和最终结果，用 200 字以内概括：
+
+    {chat_history}
+
+    摘要："""
+        summary = llm.invoke(prompt).content
+        return summary
+
+    def tech_agent_node(state: WorkerState) -> dict:
+        """
+        技术支持节点 - 处理技术问题
+
+        Args:
+            state: 当前状态
+
+        Returns:
+            dict: 状态更新
+        """
+
+        task = state.get("task")
+
+        print(state, 'state')
+
+        result = tech_subgraph.invoke({"messages": [HumanMessage(content=task)]})
+
+        return {
+            "messages": result["messages"],
+            "completed_tasks": ["tech_agent"],
+        }
+
+    def sales_agent_node(state: WorkerState) -> dict:
+        """
+        调用销售子Agent
+
+        执行流程与 call_tech_agent 相同
+        """
+        print(state, 'state')
+        task = state.get("task")
+        result = sales_subgraph.invoke({"messages": [HumanMessage(content=task)]})
+        return {
+            "messages": result["messages"],
+            # "messages": [AIMessage(content="销售问题已处理，24内相关销售人员处理完毕后联系")],
+            "completed_tasks": ["sales_agent"],
+        }
+
+    def admin_agent_node(state: WorkerState) -> dict:
+        """
+        调用客户管理子Agent
+
+        执行流程与 call_tech_agent 相同
+        """
+        print(state, 'state')
+        task = state.get("task")
+        result = admin_subgraph.invoke({"messages": [HumanMessage(content=task)]})
+        return {
+            "messages": result["messages"],
+            # "messages": [AIMessage(content="账户问题已处理，24内相关客服人员处理完毕后联系")],
+            "completed_tasks": ["admin_agent"],
+        }
+
+    # 创建主管图
+    builder = StateGraph(state_schema=SupervisorState)
+
+    # 添加所有节点
+    builder.add_node("supervisor", supervisor_node)
+    builder.add_node("tech_agent", tech_agent_node)
+    builder.add_node("sales_agent", sales_agent_node)
+    builder.add_node("admin_agent", admin_agent_node)
+
+    builder.set_entry_point("supervisor")
+
+    builder.add_edge("tech_agent", "supervisor")
+    builder.add_edge("sales_agent", "supervisor")
+    builder.add_edge("admin_agent", "supervisor")
+
+    return builder.compile()
+
+
+class OutputRouting(TypedDict):
+    tasks: dict[str, str]
+
+
+def routing_prompt(content):
+    return f"""你是意图识别专家。根据用户消息，判断需调用的 Agent 类型，并将用户问题拆解，为每个 Agent 分配相应的任务描述。
+
+**Agent 类型**：
+- tech_agent：技术支持（报错、bug、故障、登录/网络/性能问题、技术咨询等）
+- sales_agent：销售服务（价格、套餐、产品信息、购买咨询、升级费用等）
+- admin_agent：账户管理（余额查询、账户信息、退款申请、账户状态等）
+
+**决策原则**：
+1. 若用户问题涉及多个领域，需将问题拆解为对应 Agent 的子任务，并为每个 Agent 分配具体的处理内容（如：将“登录报错且想升级套餐”拆为 tech_agent 和 sales_agent 各自的任务）。
+2. 若问题明显属于单一领域，只返回一个 Agent 及其任务。
+3. 若无法确定，优先选择最相关的 Agent，避免过度调用。
+4. 每个 Agent 的任务描述应清晰、具体，包含用户原始问题的关键信息。
+
+**输出格式**：请返回一个 JSON 对象，键为 Agent 名称（字符串），值为该 Agent 需要处理的问题描述（字符串）。最多包含 3 个键值对。
+
+示例：
+用户消息："我登录不了系统，而且我想了解升级套餐的费用。"
+输出：{{"tech_agent": "用户无法登录系统，需要排查登录问题", "sales_agent": "用户咨询套餐升级费用"}}
+
+用户消息：{content}
+
+请直接返回 JSON 对象，不要有其他内容。"""
+
+
+def examples():
+    """
+    运行测试示例
+
+    测试场景:
+        1. 技术问题: 登录 + 报错
+        2. 销售问题: 产品价格咨询
+        3. 管理问题: 账户余额查询
+        4. 混合问题(循环协调): 价格 + 余额查询 - 需要多次循环协调
+    """
+
+    # 定义测试用例
+    test_cases = [
+        # {"message": "我的应用登录有问题，显示error 500"},
+        # {"message": "我想了解专业版的价格"},
+        # {"message": "查询一下我的余额，用户ID是user123"},
+        {
+            "message": "我的应用登录有问题，显示error 500，另外我想了解专业版的价格。我的用户ID是user123帮我查询一下我的余额"},
+        # 复杂多任务
+    ]
+
+    graph = supervisor_graph()
+
+    initial_state = {
+        "messages": [
+            HumanMessage(content=test_cases[0].get("message", ""))
+        ],
+        "tasks": [],
+        "completed_tasks": [],
+    }
+
+    result = graph.invoke(initial_state)
+    print()
+    print()
+    print()
+    print()
+    print()
+    print('////////' * 10)
+    for msg in result["messages"]:
+        msg.pretty_print()
+
+
+if __name__ == '__main__':
+    examples()
+
+```
+
+
+
+### 小结
+
+节点可以通过 **Command** 切换节点；
+
+``` python
+def node_01(state):
+    return Command(
+				goto="", # 切换下一个节点
+      	graph="", # 没有Command.PARENT只会在当前图中去找节点，加上Command.PARENT 就能够看到当前图的节点和父图的节点，然后就能跳转父图和自己的任何节点中
+      	update={} # 更新状态，这里可以用来更新 messages， 以及其他的状态
+    )
+  
+```
+
+工具可以集成为工具节点；
+
+``` python
+@tool
+def tool_01(runtime: ToolRuntime):
+		return "xxxx"
+
+tools = [tool_01, ...其他的工具]
+   
+model_with_tools = model.bind_tools(tools)  # 将工具绑定到模型上
+
+tool_node = ToolNode(tools) # langgraph 提供的能力，将工具当成节点
+
+graph.add_node("call_tools", tool_node) # 当成节点
+```
+
+工具不仅是返回本身工具返回的能力，也可以通过  **Command** 额外的修改流程上的能力；
+
+``` python
+# 返回Command对象，用于导航到父图中的另一个代理节点
+return Command(
+    # 导航到目标代理节点
+    goto=agent_name,
+    # 没有Command.PARENT只会在当前图中去找节点，加上Command.PARENT 就能够看到当前图的节点和父图的节点，然后就能跳转父图和自己的任何节点中
+    graph="__parent__",
+    # 更新状态：将完整的消息历史传递给目标代理，并添加工具消息
+    # 这确保了聊天历史的完整性和有效性
+    update={"messages": runtime.state["messages"] + [
+        ToolMessage(name=tool_name, content=f"成功转接到 {agent_name} 代理，请开始进行乘法运算",
+                    tool_call_id=runtime.tool_call_id)]},
+)
+```
+
+一般建议工具处理额外的能力的时候补充上 **ToolMessage**消息，确保聊天历史的完整性和有效性；
+
+
+
+子图消息可以不共享，也可以继承父图的消息（形成流程上的共享状态）；
+
+``` python
+parent_graph.add_node("child_graph", child_graph) # 默认情况下 child_graph 节点的状态就是继承父图的
+
+
+# 子图通过被父图当前节点执行的话，默认子图的节点状态就是继承自父图
+def child_graph_node(state: ParentState) -> ParentState:
+```
+
+子图通过当成节点的方式，交给父图，默认子图的状态就是接受父图的；如果通过 **send** 并发的方式由 **send** 额外传递；
+
+``` python
+# 父图节点
+def parent_graph_node(state: ParentState) -> ParentState:
+		# 逻辑
+    # 或者大模型思考决策后需要调用子图
+    return [Send(worker_key, WorkerState(number=num)) for num in numbers]
+```
+
+当然也可以配合  **Command**
+
+``` python
+# 父图节点
+def parent_graph_node(state: ParentState) -> ParentState:
+		# 逻辑
+    # 或者大模型思考决策后需要调用子图
+    return Command(
+      goto=[Send(worker_key, WorkerState(number=num)) for num in numbers],
+      update={} # 期间也可以更新其他状态
+    ) 
+```
+
+**工具进行交接**的特点就是依赖工具切换子图的方式实现；
+
+**自定义主管架构**中特点就是，主管节点负责责任务识别和分配（使用 LLM 做意图识别）；子图当前节点由主管节点执行并在最后交回到主管节点总结汇总；
+
+状态的管理可以是由共享的，也可以不共享，建议不共享保证子图的干净利索；
+
+最常见的方式就是父图-子图过程中通过一个中间的节点来承接：
+
+``` python
+def middle_node(state:ParentState) -> ParentState:
+		result = child_graph.invoke(message) # 在这里调用子图
+    return {"messages": [result["messages"]]} # 子图返回的内容是否需要加入到父图的状态中，具体看情况，一般加入会保证聊天历史的完整性和有效性
+	
+```
+
+工具可以修改状态，可以通过  Command 命令修改节点跳转；
+
+节点可以是函数，工具，也可以是图；
+
+
+
+# 持久性
+
+
+
+
+
 # checkpointer检查点
+
+
+
+
+
+# replay重放机制
+
+
+
+
 
 # store长期记忆
 
-# 多智能体
+
+
+# 记忆存储
+
+
+
+
 
 # stream流式输出
+
+
+
+
+
+# interrupt 人机交互
 
