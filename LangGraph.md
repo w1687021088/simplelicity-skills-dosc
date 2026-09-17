@@ -2119,7 +2119,7 @@ for message in result["messages"]:
 
 
 
-![agent__010](/Users/zhangjiewu/Desktop/docs/image/agent__010.png)
+![agent__010](./image/agent__010.png)
 
 ## 交接（Handoffs）
 
@@ -4077,22 +4077,439 @@ def middle_node(state:ParentState) -> ParentState:
 
 
 
-# 持久性
-
-
-
-
-
 # checkpointer检查点
 
+检查点（Checkpointing）是 LangGraph 持久性的核心机制。它允许你在图执行过程中的任何点保存状态，并在需要时恢复。
 
+**核心概念**
+- 检查点(Checkpoint): 图状态的快照
+- 线程(Thread): 用于访问检查点的唯一标识
+- 检查点保存器(Checkpointer): 负责保存和恢复状态的组件
+
+## 线程(Threads)
+线程是检查点保存器保存的每个检查点分配的唯一 ID 或线程标识符
+当使用检查点调用图表时，必须指定thread_id作为configurable配置部分的一部分：
+
+```python
+# 调用图时必须指定 thread_id
+config = {"configurable": {"thread_id": "unique_thread_id"}} # thread_id 必须唯一
+result = graph.invoke(input_data, config=config)
+```
+
+**特点**
+- 每个线程代表一个独立的对话或执行上下文
+- 线程允许在图执行后访问图的状态
+- 支持多个并发线程
+
+## LangGraph 中检查点的作用
+
+| 🌟 容错恢复                  | 如果执行中断（如容器崩溃、任务超时），可以从上次保存的状态恢复，不用重跑整个流程 |
+| --------------------------- | ------------------------------------------------------------ |
+| 💾 状态追踪/审计             | 可以记录每一步节点执行时的中间状态，方便 Debug、回溯和监控   |
+| 🔁 实现有状态的异步/长流程图 | 对于多轮对话、多阶段任务，检查点使 LangGraph 支持状态持久化和任务跟踪 |
+
+
+## 本质理解
+
+LangGraph 中的图是围绕 **`State`** **状态对象** 构建的：
+
+> 每个节点执行时会读取当前State，并返回State的局部更新，这些更新会被合并到全局State中。
+
+所谓的“检查点”就是：
+
+> **在某个节点运行后，把当时的** **`State`** **存起来**（比如存到数据库或磁盘）
+
+然后如果下次因为任何原因中断或重新运行，只需：
+
+> **加载上次的检查点状态** **`State`****，重新进入图流程**
 
 
 
 # replay重放机制
+![agent__013](./image/agent__013.png)
 
 
 
+## 更新对应状态（分叉）
+
+使用 graph.update_state() 方法编辑图状态。
+更新状态（Update State）就是手动修改某个 Checkpoint 对应的状态数据。它不会删除原来的历史，而是基于这个状态创建一个新的 Checkpoint。你可以修改消息、工具结果以及其他 State 字段。更新完成后，可以从这个新状态继续执行后续节点。这是实现人工介入、调试和纠错的重要机制。
+
+
+1. **config**
+- 必须包含 thread_id 指定要更新的线程
+- 可选包含 checkpoint_id 来分叉选定的检查点
+2. **values**
+- 用于更新状态的值
+- 更新会传递给 reducer 函数（如果定义了）
+- 没有 reducer 的通道会被覆盖
+3. **as_node**
+- 可选参数，指定更新来自哪个节点
+- 影响下一步执行的节点
+
+
+**例子：**
+```python
+from operator import add
+from typing import TypedDict, Annotated
+from langchain_core.runnables import RunnableConfig
+from langgraph.graph import StateGraph
+from langgraph.checkpoint.memory import InMemorySaver
+import random
+
+from langgraph.graph.state import CompiledStateGraph
+from langgraph.types import StateSnapshot
+
+
+class State(TypedDict):
+    node_1: str
+    node_2: str
+    node_3: str
+    node_4: str
+    question: str
+    comments: Annotated[list, add]  # 评论
+
+
+def node_1(_: State):
+    return {
+        "node_1": f"节点 1-{random.randint(100, 999)}",
+        "comments": [f"节点 1-{random.randint(100, 999)}"]
+    }
+
+
+def node_2(_: State):
+    return {
+        "node_2": f"节点 2-{random.randint(100, 999)}",
+        "comments": [f"节点 2-{random.randint(100, 999)}"]
+    }
+
+
+def node_3(_: State):
+    return {
+        "node_3": f"节点 3-{random.randint(100, 999)}",
+        "comments": [f"节点 3-{random.randint(100, 999)}"]
+    }
+
+
+def node_4(_: State):
+    return {
+        "node_4": f"节点 4-{random.randint(100, 999)}",
+        "comments": [f"节点 4-{random.randint(100, 999)}"]
+
+    }
+
+
+def create_graph(checkpointer: InMemorySaver) -> CompiledStateGraph[State]:  # type: ignore
+    builder = StateGraph(State)
+
+    # 添加节点
+    builder.add_node(
+        "node_1",
+        node_1
+    )
+
+    builder.add_node(
+        "node_2",
+        node_2
+    )
+
+    builder.add_node(
+        "node_3",
+        node_3
+    )
+
+    builder.add_node(
+        "node_4",
+        node_4
+    )
+
+    # ============================================================
+    # 10. 定义 Graph 流程
+    # ============================================================
+
+    builder.add_edge(
+        "node_1",
+        "node_2"
+    )
+
+    builder.add_edge(
+        "node_2",
+        "node_3"
+    )
+
+    builder.add_edge(
+        "node_3",
+        "node_4"
+    )
+
+    builder.set_entry_point("node_1")
+
+    graph = builder.compile(
+        checkpointer=checkpointer
+    )
+
+    return graph
+
+
+# 获取 State 历史
+def state_history(graph: CompiledStateGraph, config: RunnableConfig) -> list[StateSnapshot]:
+    return list(
+        graph.get_state_history(config)
+    )
+
+
+# 获取 Replay 起点
+def get_replay_checkpoint(next_node_name: str, history: list[StateSnapshot]):
+    replay_checkpoint = None # 重放检查点
+    for checkpoint in history:
+        if checkpoint.next == (next_node_name,): # 下个节点名称
+            replay_checkpoint = checkpoint
+            break
+
+    if replay_checkpoint is None:
+        raise RuntimeError(
+            f"没有找到节点 {next_node_name} 执行前的 Checkpoint"
+        )
+
+    return replay_checkpoint
+
+
+# 分叉
+def fork_main():
+    checkpointer = InMemorySaver()
+    # 定义配置
+    config: RunnableConfig = {
+        "configurable": {
+            "thread_id": "replay-demo-001"
+        }
+    }
+    # 创建 Graph
+    graph = create_graph(checkpointer=checkpointer)
+
+    # 执行 Graph
+    result = graph.invoke(
+        {
+            "question": "LangGraph 的 Replay 机制是什么？"
+        },
+        config=config
+    )
+
+
+    # 获取 State 历史
+    history = state_history(graph, config)
+    replay_checkpoint = get_replay_checkpoint(next_node_name="node_2", history=history)
+
+    print("\n\n")
+    print("#" * 70)
+    print("获取 node_2 重放")
+    print("#" * 70)
+    print("\nconfig 配置:")
+    print(
+        replay_checkpoint.config)  # {'configurable': {'thread_id': 'replay-demo-001', 'checkpoint_ns': '', 'checkpoint_id': '1f1a075a-40c6-6a86-8001-96a14b89e275'}}
+    print("\nparent_config 上个 checkpoint 配置，上个节点执行完后的:")
+    print(
+        replay_checkpoint.parent_config)  # {'configurable': {'thread_id': 'replay-demo-001', 'checkpoint_ns': '', 'checkpoint_id': '1f1a075a-40c5-6c4e-8000-556b85dc1574'}}
+    print("\nstate 状态:")
+    print(replay_checkpoint.values)  # {'node_1': '节点 1-215', 'question': 'LangGraph 的 Replay 机制是什么？'}
+    print("\nnext 下个节点，是个元组:")
+    print(replay_checkpoint.next)  # ('node_2',)
+    print("\ntasks 任务列表:")
+    print(
+        replay_checkpoint.tasks)  # (PregelTask(id='c3dc8bab-b2ac-52d7-00a5-1392cc4fbe67', name='node_2', path=('__pregel_pull', 'node_2'), error=None, interrupts=(), state=None, result={'node_2': '节点 2-183'}),)
+    print("\nmetadata 元数据:")
+    print(replay_checkpoint.metadata)  # {'source': 'loop', 'step': 1, 'parents': {}}
+    print("\ncreated_at 创建时间:")
+    print(replay_checkpoint.created_at)  # '2026-08-25T11:13:09.941173+00:00'
+    print("\ninterrupts 中断列表:")
+    print(replay_checkpoint.interrupts)  # ()
+
+    print("\n\n")
+    print("#" * 70)
+    print("开始 Replay")
+    print("#" * 70)
+
+    fork_config = graph.update_state(
+        config=replay_checkpoint.config,
+        values={
+            # 修改 comments
+            "comments": ["更新插入'comments'"],
+            # 覆盖节点 1 的结果
+            # "node_1": "节点 1-999",
+            # 覆盖 node_2 的结果是不行的，检查点是从 node_2 开始重放；因为 values 先设置，node_2 重放会覆盖 values
+            # 如果重放node_2，并且同时需要修改的话，开启 as_node 指定 node_2，代表 node_2 不再执行
+            # "node_2": "节点 2-999"
+        },
+        as_node=None  # as_node - 可选参数，指定更新来自哪个节点, - 影响下一步执行的节点;
+    )
+
+    final_result = graph.invoke(None, fork_config)
+
+    print("\n\n")
+    print("#" * 70)
+    print("第一次执行完成")
+    print("#" * 70)
+    print(result["node_1"])
+    print(result["node_2"])
+    print(result["node_3"])
+    print(result["node_4"])
+    print(result["comments"])
+
+    print("\n\n")
+    print("#" * 70)
+    print("重放完成")
+    print("#" * 70)
+    print(final_result["node_1"], "与第一次执行结果相同")
+    print(final_result["node_2"], "这里开始重放")
+    print(final_result["node_3"])
+    print(final_result["node_4"])
+    print(final_result["comments"])
+
+
+if __name__ == '__main__':
+    fork_main()
+```
+
+获取当前会话的检查点历史记录通过**get_state_history**：
+
+```python
+# 获取 State 历史
+def state_history(graph: CompiledStateGraph, config: RunnableConfig) -> list[StateSnapshot]:
+    return list(
+        graph.get_state_history(config)
+    )
+```
+
+恢复节点：
+```python
+# 获取 State 历史
+history = state_history(graph, config)
+
+# 获取 Replay 起点
+def get_replay_checkpoint(next_node_name: str, history: list[StateSnapshot]):
+    replay_checkpoint = None # 重放检查点
+    for checkpoint in history:
+        if checkpoint.next == (next_node_name,): # 下个节点名称
+            replay_checkpoint = checkpoint
+            break
+
+    if replay_checkpoint is None:
+        raise RuntimeError(
+            f"没有找到节点 {next_node_name} 执行前的 Checkpoint"
+        )
+
+    return replay_checkpoint
+```
+
+及时多轮对话后，节点有多次执行记录，取最近的一次执行记录；
+
+采用后进先出的原则，取最新的一次执行记录
+
+```python
+# 执行 Graph
+result = graph.invoke(
+    {
+        "question": "LangGraph 的 Replay 机制是什么？ 第一轮"
+    },
+    config=config
+)
+
+result = graph.invoke(
+    {
+        "question": "LangGraph 的 Replay 机制是什么？ 第二轮"
+    },
+    config=config
+)
+
+history = state_history(graph, config)
+for checkpoint in history:
+    print(checkpoint.next)
+    print()
+
+#目标是 ('node_2',) 重放
+
+# ()
+# 
+# ('node_4',)
+# 
+# ('node_3',)
+# 
+# ('node_2',) 取这一次
+# 
+# ('node_1',)
+# 
+# ('__start__',)
+# 
+# ()
+# 
+# ('node_4',)
+# 
+# ('node_3',)
+# 
+# ('node_2',)
+# 
+# ('node_1',)
+# 
+# ('__start__',)
+```
+
+重放之后再次检查历史记录
+```python
+print("\n\n")
+print("#" * 70)
+print("历史检查点")
+print("#" * 70)
+history = state_history(graph, config)
+for checkpoint in history:
+    print(checkpoint.next)
+    print()
+
+
+# ######################################################################
+# 历史检查点
+# ######################################################################
+# ()
+# 
+# ('node_4',)
+# 
+# ('node_3',)
+# 
+# ('node_2',)
+# 
+# ()
+# 
+# ('node_4',)
+# 
+# ('node_3',)
+# 
+# ('node_2',)
+# 
+# ('node_1',)
+# 
+# ('__start__',)
+# 
+# ()
+# 
+# ('node_4',)
+# 
+# ('node_3',)
+# 
+# ('node_2',)
+# 
+# ('node_1',)
+# 
+# ('__start__',)
+```
+**重放之后的节点会把之前的节点状态数据进行替换掉，注意不是替换检查点，检查点是追加。**
+
+记住检查点会被**追加** **追加** **追加**
+
+
+**总结：**
+1. 不带状态更新的重放，获取到对应检查点后，会先获取该检查点进行之后节点的执行
+2. 带状态更新的重放，会在原有节点的基础上，开辟一条新分支，继续执行剩下的节点
+本质区别：**update_state** 就是带状态更新的重放;
+
+推荐使用 **update_state** 来进行重放；
 
 
 # store长期记忆
