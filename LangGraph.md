@@ -230,7 +230,7 @@ print(result)  # {'final_answer': '根据搜索结果：搜索了：什么是Lan
 **Reducer（归并函数）**：在 LangGraph 中，所有节点返回的都是“局部更新结果”，**Reducer 是用于合并多个节点输出更新的机制**。 *
 *将每个节点返回的“局部状态更新”统一合并进全局的 State。**
 
-![agent__006](/Users/zhangjiewu/Desktop/docs/image/agent__006.png)
+![agent__006](./image/agent__006.png)
 
 原本的状态更新只能采用覆盖的形式；
 
@@ -604,7 +604,7 @@ print(result)  # {'user_type': 'vip', 'message': '我要退款', 'result': 'VIP�
 
 # Send并行
 
-![agent__007](/Users/zhangjiewu/Desktop/docs/image/agent__007.png)
+![agent__007](./image/agent__007.png)
 
 在 LangGraph 中，默认情况下：
 
@@ -1594,7 +1594,7 @@ graph TD;
 	classDef last fill:#bfb6fc
 ```
 
-![image-20260916094232393](/Users/zhangjiewu/Desktop/docs/image/agent__008.png)
+![image-20260916094232393](./image/agent__008.png)
 
 # tool工具
 
@@ -1907,7 +1907,7 @@ LangGraph子图（Subgraph）是一种模块化的图结构，允许您将复杂
 
 
 
-![agent__009](/Users/zhangjiewu/Desktop/docs/image/agent__009.png)
+![agent__009](./image/agent__009.png)
 
 ## 子图的优势
 
@@ -2138,7 +2138,7 @@ for message in result["messages"]:
 
 
 
-![agent__011](/Users/zhangjiewu/Desktop/docs/image/agent__011.png)
+![agent__011](./image/agent__011.png)
 
 ``` python
 from typing import Literal
@@ -2507,7 +2507,7 @@ if __name__ == "__main__":
 
 先根据主管将用户任务进行分解（多个子问题），在依次指定子智能体去执行任务列表，最后由主智能体总结回复
 
-![agent__012](/Users/zhangjiewu/Desktop/docs/image/agent__012.png)
+![agent__012](./image/agent__012.png)
 
 
 
@@ -4503,8 +4503,8 @@ for checkpoint in history:
 
 记住检查点会被**追加** **追加** **追加**
 
-
 **总结：**
+
 1. 不带状态更新的重放，获取到对应检查点后，会先获取该检查点进行之后节点的执行
 2. 带状态更新的重放，会在原有节点的基础上，开辟一条新分支，继续执行剩下的节点
 本质区别：**update_state** 就是带状态更新的重放;
@@ -4518,16 +4518,245 @@ Store 主要是存储用户画像【用户的行为习惯，用户的爱好、�
 langgraph中对应store的介绍，就是为了跨会话知道之前用户的信息
 
 **Store 接口**
+
 - 检查点保存器单独无法跨线程共享信息
 - Store 接口解决了这个问题
 - 可以在所有聊天对话中保留用户特定信息
 
 
 
+**通过内存方式**(开发快速验证)
+
+``` python
+from langgraph.store.memory import InMemoryStore
+```
+
+
+
+
+
+**namespace 命名空间**
+
+命名空间用于标记 store
+
+推荐用 `(user_id, "preferences")` 或 `(user_id, "profile")` 这样的元组来隔离每个用户的偏好。同一个用户的不同类型记忆放在不同 namespace 下，互不干扰。
+
+
+
+``` python
+namespace_for_memory = ("user_id", "memories")
+```
+
+
+
+**key 键**
+
+默认用 `str(uuid.uuid4())` 就够。如果你需要**按固定 key 精确读取**（比如用 `store.get(namespace, "user_profile")` 直接获取用户档案），才用有语义的 key。否则 UUID 更省心，不需要操心冲突。
+
+``` python
+import uuid
+
+memory_id_key = str(uuid.uuid4())
+```
+
+
+
+**value  值（任意值）**
+
+
+
+``` python
+memory_1 = {
+    "hobby": "我的爱好是：篮球、音乐、美食、编程..."
+}
+
+```
+
+
+
+### 基础用法
+
+每种内存类型都是一个具有特定属性的 Python 类（**Item**）。我们可以通过上述转换将其作为字典访问`.dict`。它具有以下属性：
+
+- `value`：此内存的值（本身就是一个字典）
+- `key`：此命名空间中此内存的唯一键
+- `namespace`：字符串元组，此内存类型的命名空间
+- `created_at`：此内存创建的时间戳
+- `updated_at`：此内存更新的时间戳
+
+### 查询
+
+``` python
+value = store.get(namespace, key)
+
+print(value) # Item
+```
+
+### 添加
+
+``` python
+store.put(namespace, key, val) 
+
+store.put(namespace, key, val, ttl=1)  # 可以设置过期时间，分钟
+```
+
+**注意 InMemoryStore 不支持设置 ttl**
+
+
+
+### 修改
+
+``` python
+store.put(
+        namespace,
+        key,                        # 用查到的 key
+        {"food": "sushi"}                # 新内容
+    )
+```
+
+put 默认会检查是否存在，不存在则设置，存在则替换；
+
+
+
+### 删除
+
+``` python
+store.delete(namespace, key)
+```
+
+
+
+### **按 namespace 批量删除**
+
+``` python
+store.delete(namespace)
+```
+
+
+
+### 查询
+
+``` python
+items = store.search(namespace) 
+```
+
+- **query**: （语义检索）：匹配的是你通过 `index` 配置嵌入的 `value` 字段。
+
+- **filter**: 是对 `value` 字典里任意字段做**精确的结构化过滤**，不涉及向量计算。
+
+  初始化 Store 时，通过 `index` 参数告诉它要把 `value` 里的哪些内容转成向量。
+
+  可以指定只嵌入特定字段，比如 fields: ["text"]，那么语义搜索就只基于这个 text 字段的内容进行匹配。
+
+  ``` python
+  store.put(
+      namespace=("user_123", "memories"),  # 命名空间，不参与嵌入
+      key="mem-001",                       # 键，不参与嵌入
+      value={                              # 值，嵌入的候选源
+          "text": "用户偏好深色模式",       # 如果 fields=["text"]，嵌入这个
+          "confidence": 0.9,               # 不会被嵌入（如果只嵌 text）
+          "category": "preference"         # 不会被嵌入（如果只嵌 text）
+      }
+  )
+  ```
+
+  当配置 `fields=["text"]` 时，Store 只会把 `"用户偏好深色模式"` 这句话转成向量。后续你用 `query="UI 设置"` 去搜，语义匹配的是 `text` 字段的内容，而不是 `confidence` 或 `category`。
+
+- **limit**: 限制取值数量
+- **offset** 在返回结果之前要跳过的项目数量。
+- **refresh_ttl** 是否刷新返回项目的 TTL。如果未指定 TTL，则忽略此参数。
+
+
+
+## 语义搜索
+
+通过设置 **index**，语义化检索；
+
+``` python
+import uuid
+
+from langgraph.store.memory import InMemoryStore
+from settings import app_settings
+
+embedding = app_settings.bailian_openai_embedding_client()
+
+store = InMemoryStore(
+    index={
+        "embed": embedding, # 向量模型
+        "dims": 1024, # 向量的维度
+        "fields": [ # 告诉向量数据库哪些字段需要嵌入
+            "hobby",
+        ]
+    }
+)
+
+namespace = ("user_id", "memories")
+
+key = str(uuid.uuid4())
+
+value = {
+    "hobby": "我的爱好是：篮球、音乐、美食、编程..."
+}
+
+store.put(namespace, key, value)
+
+print(f"✓ 存储 hobby 记忆: {key}")
+
+print("\n搜索: 用户的爱好有哪些？")
+memories = store.search(
+    namespace,
+    query="用户的爱好有哪些？",
+    limit=3
+)
+print(f"搜索结果数量: {len(memories)}")
+if memories:
+    print(f"最相关结果: {memories[0].dict()}")
+else:
+    print("没有找到结果")
+```
+
+- **embed** 向量模型
+
+- **dims** 向量的维度
+
+- **fields** 告诉向量数据库哪些字段需要嵌入
+
+
+
+## 建议用 Store 存偏好
+
+**它就是为“跨会话记忆”设计的**
+Store 的核心定位就是“跨 thread 长期记忆”，存储用户偏好、事实、积累的知识，这些数据应该在一个会话结束后依然存在，并在下一个会话中能被读取 。你用表存虽然也能实现，但 Store 的 `namespace + key` 模型天然适配这种“按用户隔离、按类型分组”的需求。
+
+
+
+**语义检索是“内置能力”，不是“额外工程”**
+Store 配置好 Embedding 后，`store.search(namespace, query="用户喜欢吃什么")` 直接返回结果 。用表存的话，你得自己接入向量库、写相似度查询、把结果拼回上下文，工作量不小。
+
+
+
+**开发效率和一致性**
+LangGraph 的节点函数里，通过 `Runtime` 对象可以直接访问 `store`，记忆的读写和图执行生命周期绑定，不需要额外管理数据库连接和事务 。用表存则需要自己处理连接池、事务、以及“什么时候读、什么时候写”的逻辑。
+
+
+
+### 什么时候可以不用 Store
+
+如果你的偏好存储**极其简单**：比如只有“主题颜色”“语言”这种固定 key-value，不需要语义搜索，也不需要跨会话的复杂召回，那你用自己的表（甚至 Redis）完全够用。Store 的价值在于它把“语义检索 + 命名空间隔离 + 图集成”打包好了，如果你不需要这些，用表更轻。
+
+
+
+### 建议
+
+**用 Store。** 已经在做 LangGraph 项目，偏好存储和 Agent 的“记忆”能力是同一套体系。用 Store 能让你在后续加 RAG、加多 Agent 共享记忆时，不用重新造轮子。
+
+
+
 # 记忆存储
 
 
-$|RmK'w#
+
+
 
 
 # stream流式输出
