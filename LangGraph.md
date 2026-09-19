@@ -4723,7 +4723,7 @@ else:
 
 
 
-## 建议用 Store 存偏好
+### 建议用 Store 存偏好
 
 **它就是为“跨会话记忆”设计的**
 Store 的核心定位就是“跨 thread 长期记忆”，存储用户偏好、事实、积累的知识，这些数据应该在一个会话结束后依然存在，并在下一个会话中能被读取 。你用表存虽然也能实现，但 Store 的 `namespace + key` 模型天然适配这种“按用户隔离、按类型分组”的需求。
@@ -4752,6 +4752,236 @@ LangGraph 的节点函数里，通过 `Runtime` 对象可以直接访问 `store`
 
 
 
+### langgraph中使用
+
+``` python
+import uuid
+from dataclasses import dataclass
+from operator import add
+from typing import TypedDict, Annotated
+
+from langgraph.graph import StateGraph
+
+from settings import app_settings
+
+from langchain_core.messages import BaseMessage, AIMessage, HumanMessage
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.runtime import Runtime
+from langgraph.store.memory import InMemoryStore
+
+llm = app_settings.get_qwen_client()
+
+
+# 定义状态结构
+class MessagesState(TypedDict):
+    messages: Annotated[list[BaseMessage], add]
+
+
+@dataclass
+class MyContext:
+    user_id: str
+
+
+
+# 创建检查点保存器和内存存储
+checkpointer = InMemorySaver()
+in_memory_store = InMemoryStore()
+
+
+# 聊天机器人节点  *代表后面的参数必须使用显示写出参数名称  store=in_memory_store
+def chatbot(state: MessagesState, runtime: Runtime[MyContext]): # type: ignore
+    """主聊天机器人节点，处理用户消息并生成回复"""
+
+    # 获取用户ID和最新消息
+    user_id = runtime.context.user_id
+    last_message = state["messages"][-1]
+
+    # 定义内存命名空间
+    namespace = (user_id, "memories")
+
+    # 简单的聊天逻辑
+    user_input = last_message.content.lower()
+    # 将用户的长期记忆获取并组装提示词    获取所有记忆
+    memories = runtime.store.search(namespace)
+    memory_text = "\n".join(m.value["memory"] for m in memories)
+    prompt = f"请参考聊天记录：{memory_text}\n\nHuman: {user_input}\nAI:"
+
+    response = llm.invoke(prompt).content
+
+    # 存储对应的问题和答案     一般用LLM去帮你确认是否要存储当前这次对话
+    memory = f"问题：{user_input} --- 答案:{response}"
+    memory_id = str(uuid.uuid4())
+    runtime.store.put(namespace, memory_id, {"memory": memory})
+    # 返回AI消息
+    return {"messages": [AIMessage(content=response)]}
+
+
+
+# 创建图
+def create_persistent_graph():
+    """创建持久化的聊天机器人图"""
+
+    # 创建状态图
+    workflow = StateGraph(MessagesState, context_schema=MyContext)
+    # 添加节点
+    workflow.add_node("chatbot", chatbot)
+    # 添加边
+    workflow.add_edge("__start__", "chatbot")
+    workflow.add_edge("chatbot", "__end__")
+
+    # 编译图，使用检查点保存器和存储
+    graph = workflow.compile(checkpointer=checkpointer, store=in_memory_store)
+
+    return graph
+
+
+
+# 工具函数：显示状态历史
+def show_state_history(graph, config):
+    """显示状态历史"""
+    print("\n=== 状态历史 ===")
+    history = graph.get_state_history(config)
+    for i, snapshot in enumerate(history):
+        print(f"\n步骤 {i}:")
+        print(f"  配置: {snapshot.config}")
+        print(f"  值: {snapshot.values}")
+        print(f"  下一步: {snapshot.next}")
+        print(f"  元数据: {snapshot.metadata}")
+
+
+
+# 工具函数：显示存储的记忆
+def show_memories(store, user_id):
+    """显示用户的所有记忆"""
+    print(f"\n=== 用户 {user_id} 的记忆 ===")
+    namespace = (user_id, "memories")
+    memories = store.search(namespace)
+
+    if memories:
+        for memory in memories:
+            print(f"记忆ID: {memory.key}")
+            print(f"内容: {memory.value}")
+            print(f"创建时间: {memory.created_at}")
+            print(f"更新时间: {memory.updated_at}")
+            print("---")
+    else:
+        print("没有找到记忆")
+
+
+
+# 主程序
+def main():
+    # 创建图
+    graph = create_persistent_graph()
+
+    # 用户配置
+    user_id = "user_123"
+    thread_id = "conversation_1"
+
+    config = {
+        "configurable": {
+            "thread_id": thread_id,
+            "user_id": user_id
+        }
+    }
+
+    print("=== LangGraph 持久化聊天机器人 ===")
+    print("输入 'quit' 退出，'history' 查看状态历史，'memories' 查看记忆")
+
+    while True:
+        user_input = input("\n用户: ").strip()
+
+        if user_input.lower() == 'quit':
+            break
+        elif user_input.lower() == 'history':
+            show_state_history(graph, config)
+            continue
+        elif user_input.lower() == 'memories':
+            show_memories(in_memory_store, user_id)
+            continue
+
+        # 创建用户消息
+        initial_state = {
+            "messages": [HumanMessage(content=user_input)]
+        }
+
+        # 运行图
+        try:
+            result = graph.invoke(initial_state, config, context=MyContext(user_id))
+
+            # 显示AI回复
+            ai_message = result["messages"][-1]
+            print(f"AI: {ai_message.content}")
+
+        except Exception as e:
+            print(f"错误: {e}")
+
+    print("\n=== 最终状态 ===")
+    final_state = graph.get_state(config)
+    print(f"最终状态: {final_state.values}")
+
+    print("\n=== 所有记忆 ===")
+    show_memories(in_memory_store, user_id)
+
+
+# 演示不同线程间的记忆共享
+def demo_cross_thread_memory():
+    """演示跨线程记忆共享"""
+    print("\n=== 跨线程记忆共享演示 ===")
+
+    graph = create_persistent_graph()
+    user_id = "user_456"
+
+    # 第一个对话线程
+    config1 = {
+        "configurable": {
+            "thread_id": "thread_1",
+            "user_id": user_id
+        }
+    }
+
+    print("线程1 - 建立记忆:")
+    result1 = graph.invoke({
+        "messages": [HumanMessage(content="我叫Alice，我喜欢音乐")]
+    }, config1)
+    print(f"AI: {result1['messages'][-1].content}")
+
+    # 第二个对话线程（相同用户）
+    config2 = {
+        "configurable": {
+            "thread_id": "thread_2",
+            "user_id": user_id
+        }
+    }
+
+    print("\n线程2 - 访问记忆:")
+    result2 = graph.invoke({
+        "messages": [HumanMessage(content="你还记得我吗？")]
+    }, config2)
+    print(f"AI: {result2['messages'][-1].content}")
+
+    # 显示共享的记忆
+    show_memories(in_memory_store, user_id)
+
+
+if __name__ == "__main__":
+    # 运行主程序
+    main()
+
+    # 演示跨线程记忆共享
+    demo_cross_thread_memory()
+```
+
+
+
+**InMemorySaver和InMemoryStore的使用场景**：
+
+**InMemorySaver** 短期记忆：存储每个节点执行完成之后的状态（聊天历史）;
+
+**InMemoryStore** 长期记忆：跨会话（线程），存储用户相关的内容（例如用户偏好、背景资料、项目上下文、历史决策和反馈）;
+
+
+
 # 记忆存储
 
 
@@ -4761,9 +4991,1101 @@ LangGraph 的节点函数里，通过 `Runtime` 对象可以直接访问 `store`
 
 # stream流式输出
 
+LangGraph 实施了流式系统来显示实时更新，从而实现响应迅速且透明的用户体验。
+
+LangGraph 的流式传输系统可将图形运行的实时反馈显示到您的应用中。
+
+**流式输出在LangGraph中的重要性：**
+
+⚡ 用户立即看到反馈
+
+🎯 减少等待时间
+
+💾 节省内存使用
+
+😊 提升用户体验
+
+将以下一个或多个流模式作为列表传递给`stream()`或`astream()`方法：
+
+| 模式        | 描述                                                         | 概述                           |
+| ----------- | ------------------------------------------------------------ | ------------------------------ |
+| values      | 在图的每个步骤之后流式传输状态的完整值。                     | 看到完整状态                   |
+| updates     | 将图的每个步骤之后的更新流式传输到状态。如果在同一步骤中进行了多个更新（例如，运行了多个节点），则这些更新将分别流式传输。 | 看到变化部分                   |
+| custom      | 从图形节点内部流式传输自定义数据。                           | 看到自定义数据                 |
+| messages    | 从调用 LLM 的任何图形节点流式传输 2 元组（LLM 令牌、元数据）。 | 看到AI逐字输出                 |
+| debug       | 在整个图表执行过程中传输尽可能多的信息。                     | 看到调试信息                   |
+| checkpoints | 返回的检查点的完整状态内容                                   | 看到所有检查点的状态信息       |
+| tasks       | 返回任务开始/结束、错误、结果的内容                          | 看到每个任务的开始、结束和错误 |
+
+### values
+
+``` python
+from typing import TypedDict, Annotated
+
+import operator
+
+from langgraph.graph import StateGraph, START, END
+from langgraph.types import Send
+
+from settings import app_settings
+
+llm = app_settings.get_qwen_client()
+
+
+# 状态定义
+class State(TypedDict):
+    numbers: list[int]  # 输入的数字
+    results: Annotated[list[int], operator.add]  # worker的结果
+    final_sum: int  # 最终求和
+
+
+class WorkerState(TypedDict):
+    number: int
+
+# 1. Map阶段：分发数字
+def split_numbers(state: State):
+    """把数字分发给不同的worker"""
+    numbers = state["numbers"]
+
+    # 每个数字发给一个worker
+    return [Send("worker", WorkerState(number=num)) for num in numbers]
+
+
+# 2. Worker阶段：计算平方
+def worker(state: WorkerState):
+    """每个worker计算一个数字的平方"""
+    number = state["number"]
+    square = number * number
+    return {"results": [square]}
+
+
+# 3. Reduce阶段：求和
+def summer(state: State):
+    """把所有结果加起来"""
+    results = state.get("results", [])
+    total = sum(results)
+    return {"final_sum": total}
+
+
+# 构建图
+def create_simple_graph():
+    graph = StateGraph(state_schema=State)
+
+    # 添加节点
+    graph.add_node("splitter", lambda s: s)  # 分发器
+    graph.add_node("worker", worker)  # 工作节点
+    graph.add_node("summer", summer)  # 求和器
+
+    # 连接节点
+    graph.add_edge(START, "splitter")
+    graph.add_conditional_edges("splitter", split_numbers, ["worker"])  # Map阶段
+    graph.add_edge("worker", "summer")  # Worker完成后求和
+    graph.add_edge("summer", END)
+
+    return graph.compile()
+
+
+def main():
+    graph = create_simple_graph()
+
+    initial_state = {
+        "numbers": [1, 2, 3, 4, 5],
+        "results": [],
+        "final_sum": 0
+    }
+
+    for result in graph.stream(initial_state, stream_mode="values", version="v2"):
+        print(result)
+
+
+if __name__ == '__main__':
+    main()
+
+
+```
+
+输出：
+
+``` python
+{'type': 'values', 'ns': (), 'data': {'numbers': [1, 2, 3, 4, 5], 'results': [], 'final_sum': 0}, 'interrupts': ()}
+{'type': 'values', 'ns': (), 'data': {'numbers': [1, 2, 3, 4, 5], 'results': [], 'final_sum': 0}, 'interrupts': ()}
+{'type': 'values', 'ns': (), 'data': {'numbers': [1, 2, 3, 4, 5], 'results': [1, 4, 9, 16, 25], 'final_sum': 0}, 'interrupts': ()}
+{'type': 'values', 'ns': (), 'data': {'numbers': [1, 2, 3, 4, 5], 'results': [1, 4, 9, 16, 25], 'final_sum': 55}, 'interrupts': ()}
+
+```
+
+在图的每个步骤之后流式传输状态的完整值。
+
+**data** 返回当前每个步骤的执行完成之后的状态；
 
 
 
+### update
+
+``` python
+    print("====================UPDATES模式=====================")
+    for result in graph.stream(initial_state, stream_mode="updates", version="v2"):
+        print(result)
+```
+
+输出：
+
+``` python
+{'type': 'updates', 'ns': (), 'data': {'splitter': {'numbers': [1, 2, 3, 4, 5], 'results': [], 'final_sum': 0}}}
+{'type': 'updates', 'ns': (), 'data': {'worker': {'results': [1]}}}
+{'type': 'updates', 'ns': (), 'data': {'worker': {'results': [4]}}}
+{'type': 'updates', 'ns': (), 'data': {'worker': {'results': [9]}}}
+{'type': 'updates', 'ns': (), 'data': {'worker': {'results': [16]}}}
+{'type': 'updates', 'ns': (), 'data': {'worker': {'results': [25]}}}
+{'type': 'updates', 'ns': (), 'data': {'summer': {'final_sum': 55}}}
+```
+
+将图的每个步骤之后的更新流式传输到状态。如果在同一步骤中进行了多个更新（例如**Send**，运行了多个节点），则这些更新将分别流式传输。
+
+
+
+### debug
+
+调试
+
+``` python
+    print("====================DEBUG模式=====================")
+    for result in graph.stream(initial_state, stream_mode="debug", version="v2"):
+        print(result)
+
+```
+
+输出：
+
+``` python
+# 数据有点多
+
+{
+    'type': 'debug', 
+     'ns': (), 
+     'data': {
+        'step': 2,  # 当前步骤
+        'timestamp': '2026-09-19T11:20:59.373682+00:00', 
+        'type': 'task_result', 
+        'payload': {
+            'id': '31bda4e3-89f9-edd4-a8ae-6674bf40b156', 
+            'name': 'worker',  # 节点名称
+            'error': None,  # 节点错误
+            'result': {
+                'results': [1] # 更新的状态
+            }, 
+            'interrupts': []
+        }
+    }
+}
+```
+
+在整个图表执行过程中传输尽可能多的信息。
+
+
+
+### messages
+
+实现打字搞的视觉效果；
+
+``` python
+from typing import TypedDict, Annotated
+
+import operator
+
+from langgraph.graph import StateGraph, START, END
+from langgraph.types import Send
+
+from settings import app_settings
+
+llm = app_settings.get_qwen_client()
+
+
+class MyState(TypedDict):
+    question: str
+    results: str
+
+
+def generate_answer(state: MyState):
+    question = state["question"]
+    answer = llm.invoke([
+        {"role": "user", "content": f"{question}"}
+    ]) # 通过 invoke 或者 ainvoke 返回，也能实现流式，因为langchain core 内部做了处理
+    return {"answer": answer.content}
+
+
+def generate_answer1(state: MyState):
+    answer = llm.invoke([
+        {"role": "user", "content": f"你好"}
+    ])
+    return {"answer": answer.content}
+
+
+# 构建图
+def create_llm_graph():
+    graph = StateGraph(state_schema=MyState)
+
+    # 添加节点
+    graph.add_node("generate_answer", generate_answer)
+    graph.add_node("generate_answer1", generate_answer1)
+
+    # 连接节点
+    graph.add_edge(START, "generate_answer")
+    graph.add_edge("generate_answer", "generate_answer1")
+    graph.add_edge("generate_answer", END)
+
+    return graph.compile()
+
+
+def main():
+    graph = create_llm_graph()
+
+    initial_state = {"question": "什么是状态图？"}
+
+    print("====================MESSAGES模式=====================")
+    for chunk in graph.stream(initial_state, stream_mode="messages", version="v2"):
+        if chunk["type"] == "messages":
+            print(chunk) # 下面的输出
+            result, metadata = chunk["data"]
+            print(result.content, end="", flush=True) # 拿到 result.content 返回
+
+if __name__ == '__main__':
+    main()
+
+```
+
+每次流式输出都会产生一条下面的数据；
+
+重点是 **data**， 是个元组；
+
+**langgraph_node** 表示当前输出是在哪个节点；
+
+``` python
+{
+    'type': 'messages',
+    'ns': (), 
+    'data': (
+        AIMessageChunk(
+            content='状态图', 
+            additional_kwargs={}, 
+            response_metadata={
+                'model_provider': 
+                'dashscope'
+            }, 
+            id='lc_run--01a0b96f-babd-7172-b8db-b9a720a0157b', 
+            tool_calls=[], 
+            invalid_tool_calls=[],
+            tool_call_chunks=[]
+        ), 
+        {
+            'ls_integration': 'langchain_chat_model', 
+            'langgraph_step': 1, 
+            'langgraph_node': 'generate_answer', 
+            'langgraph_triggers': ('branch:to:generate_answer',), 
+            'langgraph_path': ('__pregel_pull', 'generate_answer'), 
+            'langgraph_checkpoint_ns': 'generate_answer:a8a43693-805b-51b0-e02c-19750dd51fa0', 
+            'checkpoint_ns': 'generate_answer:a8a43693-805b-51b0-e02c-19750dd51fa0',
+            'ls_provider': 'openai', 
+            'ls_model_name': 'qwen3.8-flash', 
+            'ls_model_type': 'chat', 
+            'ls_temperature': None,
+            'lc_versions': {
+                'langchain-core': '1.6.1', 
+                'langchain': '1.3.18', 
+                'langchain-openai': '1.5.1'
+            }
+        }
+    )
+}
+```
+
+ #### LangChain 的自动流式（关键点）
+
+在 `langchain_core/language_models/chat_models.py` 里，`BaseChatModel` 有个逻辑叫 `_should_stream`：
+
+```python
+def _should_stream(self, *, async_, run_manager=None, **kwargs):
+    # 如果显式传了 streaming=True，就走流
+    if self.streaming: 
+        return True
+    # 如果回调里有 on_llm_new_token 的处理器，也走流
+    if run_manager:
+        handlers = run_manager.handlers  # 遍历所有 callback
+        if any(isinstance(h, _StreamingCallbackHandler) or 
+               hasattr(h, "on_llm_new_token") for h in handlers):
+            return True
+    return False
+```
+
+**当 `_should_stream` 返回 True，`invoke` 内部其实是这么干的：**
+
+```python
+def invoke(self, input, ...):
+    if self._should_stream(...):
+        # 偷偷把 stream 收集成一个最终结果返回
+        chunks = [c for c in self.stream(input, ...)]
+        return generate_from_stream(iter(chunks))
+    # 否则才走真正的非流式 HTTP 请求
+    return self._generate(...)
+```
+
+所以在节点里写 `llm.invoke(...)`，代码看起来是"一次性调用"，但 LangGraph 注入的 callback 让它触发了 `stream` 路径，每个 token 都会通过 `on_llm_new_token` 冒泡到 `stream_mode="messages"`。
+
+
+
+#### subgraphs子图开启流式
+
+``` python
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import StateGraph, START, MessagesState, END
+
+from settings import app_settings
+
+llm = app_settings.get_qwen_client()
+
+
+# 创建子图
+def subplot(state: MessagesState) -> MessagesState:
+    # 获取大模型回答的内容进行摘要总结
+    answer = state["messages"][-1].content
+    summary_prompt = f"请用一句话总结下面这句话：\n\n答：{answer}"
+    response = llm.invoke(summary_prompt)
+    return {"messages": [response]}
+
+
+summary_subgraph = (
+    StateGraph(state_schema=MessagesState)
+    .add_node("subplot", subplot)
+    .add_edge(START, "subplot")
+    .add_edge("subplot", END)
+    .compile()
+)
+
+
+def llm_answer_node(state: MessagesState) -> MessagesState:
+    # 使用大模型进行回答
+    answer = llm.invoke(state["messages"])
+    return {"messages": [answer]}
+
+
+checkpointer = InMemorySaver()
+
+
+# 构建图
+def create_check_tasks_graph():
+    parent_graph = (
+        StateGraph(MessagesState)
+        .add_node("llm_answer", llm_answer_node)
+        .add_node("summarize_subgraph", summary_subgraph)
+        .add_edge(START, "llm_answer")
+        .add_edge("llm_answer", "summarize_subgraph")
+        .compile(checkpointer=checkpointer)
+    )
+    return parent_graph
+
+
+def main():
+    graph = create_check_tasks_graph()
+
+    print("====================checkpoints、tasks模式=====================")
+
+    config = {"configurable": {"thread_id": "1"}}
+    # 测试输入
+    input_state = {
+        "messages": [{"role": "user", "content": "langgraph是什么？请用100字介绍"}],
+    }
+
+    for chunk in graph.stream(
+            input_state,
+            config,
+            stream_mode="messages",  # tasks  |  checkpoints
+            subgraphs=True,  # 如果要子图也进行流式输出，需要开启
+            version="v2"
+    ):
+        print(chunk)
+        if chunk["type"] == "messages":
+            result, metadata = chunk["data"]
+            print(result.content, end="", flush=True)  # 拿到 result.content 返回
+
+
+if __name__ == '__main__':
+    main()
+
+```
+
+#### 不共享状态方式
+
+``` python
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import StateGraph, START, MessagesState, END
+from langgraph.config import get_config
+from settings import app_settings
+
+llm = app_settings.get_qwen_client()
+
+
+# ============ 子图 ============
+def subplot(state: MessagesState) -> MessagesState:
+    """子图节点：对最后一条消息做一句话总结"""
+    answer = state["messages"][-1].content
+    summary_prompt = f"请用一句话总结下面这句话：\n\n答：{answer}"
+    response = llm.invoke(summary_prompt)
+    # ✅ 把摘要真正写回子图 state
+    return {"messages": [response]}
+
+
+summary_subgraph = (
+    StateGraph(state_schema=MessagesState)
+    .add_node("subplot", subplot)
+    .add_edge(START, "subplot")
+    .add_edge("subplot", END)
+    .compile()
+)
+
+
+# ============ 父图节点 ============
+def llm_answer_node(state: MessagesState) -> MessagesState:
+    """父图节点：让 LLM 回答用户问题"""
+    answer = llm.invoke(state["messages"])
+    return {"messages": [answer]}
+
+
+def summarize(state: MessagesState) -> MessagesState:
+    """父图节点：在节点内手动调用子图，需要把父图 config 传下去"""
+    config = get_config()  # ✅ 拿到父图当前节点的运行 config
+    # ✅ 关键：把 config 传给子图 invoke，子图的流式才能冒泡到父图
+    result = summary_subgraph.invoke(state, config=config)
+    # ✅ 把子图结果合并回父图 state，否则白白算了
+    return {"messages": result["messages"]}
+
+
+checkpointer = InMemorySaver()
+
+
+# ============ 构建父图 ============
+def create_check_tasks_graph():
+    parent_graph = (
+        StateGraph(MessagesState)
+        .add_node("llm_answer", llm_answer_node)
+        .add_node("summarize", summarize)
+        .add_edge(START, "llm_answer")
+        .add_edge("llm_answer", "summarize")
+        .compile(checkpointer=checkpointer)
+    )
+    return parent_graph
+
+
+def main():
+    graph = create_check_tasks_graph()
+
+    print("==================== messages 模式（带子图）=====================")
+
+    config = {"configurable": {"thread_id": "1"}}
+    input_state = {
+        "messages": [{"role": "user", "content": "langgraph是什么？请用100字介绍"}],
+    }
+
+    for chunk in graph.stream(
+            input_state,
+            config,
+            stream_mode="messages",
+            subgraphs=True,      # ✅ 开启子图流式
+            version="v2",
+    ):
+        if chunk["type"] != "messages":
+            continue
+
+        result, metadata = chunk["data"]
+        ns = chunk.get("ns", ())                       # namespace：区分父子图
+        node = metadata.get("langgraph_node", "?")     # 当前节点名
+        is_sub = bool(ns)                              # ns 非空 => 来自子图
+
+        # 用不同前缀区分：父图节点直接打，子图节点加 [SUB] 标记
+        prefix = f"\n[SUB ns={ns} node={node}] " if is_sub else f"\n[MAIN node={node}] "
+        print(prefix, end="")
+        print(result.content, end="", flush=True)
+
+    print("\n\n==================== 最终 state =====================")
+    final = graph.get_state(config)
+    for m in final.values["messages"]:
+        print(f"- {type(m).__name__}: {m.content[:60]}...")
+
+
+if __name__ == '__main__':
+    main()
+```
+
+
+
+### custom
+
+``` python
+import time
+from typing import TypedDict
+
+from langgraph.config import get_stream_writer
+from langgraph.graph import StateGraph, START
+
+from settings import app_settings
+
+llm = app_settings.get_qwen_client()
+
+
+# 定义状态
+class FileState(TypedDict):
+    filename: str  # 文件名称
+    content: str  # 文件内容
+    word_count: int  # 内容数量
+    processed: bool  # 是否处理完成
+
+
+def read_file(state: FileState):
+    """步骤1：读取文件"""
+    writer = get_stream_writer()
+    # 发送开始信息
+    writer({"step": "读取文件", "status": "开始", "progress": 0})
+    time.sleep(1)
+
+    # 发送进度信息
+    writer({"step": "读取文件", "status": "正在读取...", "progress": 50})
+    time.sleep(1)
+
+    # 模拟文件内容
+    content = "这是一个示例文件，包含一些文本内容。"
+
+    # 发送完成信息
+    writer({
+        "step": "读取文件",
+        "status": "完成",
+        "progress": 100,
+        "data": {"size": len(content)}
+    })
+
+    return {"content": content}
+
+
+def count_words(state: FileState):
+    """步骤2：统计字数"""
+    writer = get_stream_writer()
+    writer({"step": "统计字数", "status": "开始", "progress": 0})
+    time.sleep(0.5)
+
+    writer({"step": "统计字数", "status": "正在分析...", "progress": 30})
+    time.sleep(1)
+
+    writer({"step": "统计字数", "status": "计算中...", "progress": 70})
+    time.sleep(0.5)
+
+    # 计算字数
+    word_count = len(state["content"])
+
+    writer({
+        "step": "统计字数",
+        "status": "完成",
+        "progress": 100,
+        "data": {"word_count": word_count}
+    })
+
+    return {"word_count": word_count}
+
+
+def finalize_processing(state: FileState):
+    """步骤3：完成处理"""
+    writer = get_stream_writer()
+    writer({"step": "完成处理", "status": "生成报告", "progress": 50})
+    time.sleep(1)
+
+    writer({
+        "step": "完成处理",
+        "status": "全部完成",
+        "progress": 100,
+        "data": {
+            "filename": state["filename"],
+            "total_chars": state["word_count"],
+            "summary": f"文件 {state['filename']} 处理完成，共 {state['word_count']} 个字符"
+        }
+    })
+
+    return {"processed": True}
+
+
+# 构建图
+def create_custom_graph():
+    graph = (
+        StateGraph(state_schema=FileState)
+        .add_node("read_file", read_file)
+        .add_node("count_words", count_words)
+        .add_node("finalize", finalize_processing)
+        .add_edge(START, "read_file")
+        .add_edge("read_file", "count_words")
+        .add_edge("count_words", "finalize")
+        .compile()
+    )
+    return graph
+
+
+def main():
+    graph = create_custom_graph()
+
+    print("====================CUSTOM模式=====================")
+    # 初始状态
+    initial_state1 = {
+        "filename": "example.txt",
+        "content": "",
+        "word_count": 0,
+        "processed": False
+    }
+    # 使用Custom模式运行
+    for chunk in graph.stream(initial_state1, stream_mode="custom", version="v2"):
+        if chunk["type"] == "custom":
+            data = chunk["data"]
+            step = data.get("step", "")  # 当前步骤
+            status = data.get("status", "")  # 目前状态
+            progress = data.get("progress", 0)  # 完成进度
+            data_result = data.get("data", {})  # 最终数据
+
+            # 显示进度
+            progress_bar = "█" * (progress // 10) + "░" * (10 - progress // 10)
+            print(f"\n[{step}] {status}")
+            print(f"进度: [{progress_bar}] {progress}%")
+
+            # 显示额外数据
+            if data_result:
+                for key, value in data_result.items():
+                    print(f"{key}: {value}")
+
+
+
+if __name__ == '__main__':
+    main()
+
+```
+
+自定义输出只能通过**get_stream_writer**写入
+
+``` python
+from langgraph.config import get_stream_writer
+
+writer = get_stream_writer()
+```
+
+
+
+#### 实现打字机的写法
+
+``` python
+from langchain_core.messages import HumanMessage, AIMessage
+from langgraph.config import get_stream_writer
+from langgraph.graph import StateGraph, START, MessagesState
+
+from settings import app_settings
+
+llm = app_settings.get_qwen_client()
+
+
+# 定义状态
+class State(MessagesState):
+    question: str
+    answer: str
+
+
+def node_01(state: State):
+    writer = get_stream_writer()  # 拿到当前节点的“管道”
+    answer = ""
+
+    # 用 llm.stream() 而不是 invoke，拿到 token 迭代器
+    for chunk in llm.stream([HumanMessage(content=state["question"])]):
+        if chunk.content:
+            writer({"content": chunk.content})   # 手动把每个 token 推给 custom 流
+            answer += chunk.content
+
+    # 如果你还需要更新 state，正常 return 即可
+    return {
+        "answer": answer,
+        "messages": [AIMessage(content=answer)]
+    }
+
+
+# 构建图
+def create_custom_graph():
+    graph = (
+        StateGraph(state_schema=State)
+        .add_node("node_01", node_01)
+        .add_edge(START, "node_01")
+        .compile()
+    )
+    return graph
+
+
+def main():
+    graph = create_custom_graph()
+
+    print("====================CUSTOM模式=====================")
+    # 初始状态
+    initial_state1 = {"question": "什么是状态图？"}
+    # 使用Custom模式运行
+    for chunk in graph.stream(initial_state1, stream_mode="custom", version="v2"):
+        print(chunk)
+
+
+if __name__ == '__main__':
+    main()
+
+```
+
+关键在于**管道get_stream_writer**，并且自定义模式下无法使用 **invoke**实现流式；LLM 调用 **stream**，拿到 token 迭代器；
+
+``` python
+{'type': 'custom', 'ns': (), 'data': {'content': '**'}} 
+{'type': 'custom', 'ns': (), 'data': {'content': '状态图'}}
+{'type': 'custom', 'ns': (), 'data': {'content': '（State Diagram）**'}}
+{'type': 'custom', 'ns': (), 'data': {'content': '，也称为'}}
+{'type': 'custom', 'ns': (), 'data': {'content': '**状态机图'}}
+{'type': 'custom', 'ns': (), 'data': {'content': '（State Machine'}}
+{'type': 'custom', 'ns': (), 'data': {'content': ' Diagram）**或**'}}
+{'type': 'custom', 'ns': (), 'data': {'content': '有限状态自动机'}}
+...
+```
+
+**data** 类型就是由管道决定返回什么；
+
+``` python
+writer({"content": chunk.content}) # 可以在这里添加其他的状态或者数据信息；
+```
+
+
+
+### tasks
+
+任务模式和debug 比较像；返回的数据没有debug 那么详细；是按照任务的方式返回的，每个任务就是每次节点的执行；
+
+``` python
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import StateGraph, START, MessagesState, END
+from settings import app_settings
+
+llm = app_settings.get_qwen_client()
+
+
+# ============ 子图 ============
+def subplot(state: MessagesState) -> MessagesState:
+    """子图节点：对最后一条消息做一句话总结"""
+    answer = state["messages"][-1].content
+    summary_prompt = f"请用一句话总结下面这句话：\n\n答：{answer}"
+    response = llm.invoke(summary_prompt)
+    # ✅ 把摘要真正写回子图 state
+    return {"messages": [response]}
+
+
+summary_subgraph = (
+    StateGraph(state_schema=MessagesState)
+    .add_node("subplot", subplot)
+    .add_edge(START, "subplot")
+    .add_edge("subplot", END)
+    .compile()
+)
+
+
+# ============ 父图节点 ============
+def llm_answer_node(state: MessagesState) -> MessagesState:
+    """父图节点：让 LLM 回答用户问题"""
+    answer = llm.invoke(state["messages"])
+    return {"messages": [answer]}
+
+
+checkpointer = InMemorySaver()
+
+
+# ============ 构建父图 ============
+def create_check_tasks_graph():
+    parent_graph = (
+        StateGraph(MessagesState)
+        .add_node("llm_answer", llm_answer_node)
+        .add_node("summarize", summary_subgraph)
+        .add_edge(START, "llm_answer")
+        .add_edge("llm_answer", "summarize")
+        .compile(checkpointer=checkpointer)
+    )
+    return parent_graph
+
+
+def main():
+    graph = create_check_tasks_graph()
+
+    print("==================== tasks 模式（带子图）=====================")
+
+    config = {"configurable": {"thread_id": "1"}}
+    input_state = {
+        "messages": [{"role": "user", "content": "langgraph是什么？请用100字介绍"}],
+    }
+
+    for chunk in graph.stream(
+            input_state,
+            config,
+            stream_mode="tasks",
+            subgraphs=True,      # ✅ 开启子图流式
+            version="v2",
+    ):
+        print(chunk, end="")
+
+
+if __name__ == '__main__':
+    main()
+```
+
+输出：
+
+``` python
+{'type': 'tasks', 'ns': ('summarize:ba3500ee-db07-9134-dfae-1f8460bd0b06',), 'data': {'id': '14ab2b21-a549-68e8-d6a0-a1b5bafc92a9', 'name': 'subplot', 'input': {'messages': [HumanMessage(content='langgraph是什么？请用100字介绍', additional_kwargs={}, response_metadata={}, id='721dd1fe-1d1a-487f-93de-f97a28623f2f'), AIMessage(content='LangGraph 是 LangChain 推出的框架，用于构建有状态、多角色的 LLM 应用。它通过图结构管理复杂工作流，支持循环、分支及持久化记忆，特别适合开发需要精细控制流程的智能代理系统。', additional_kwargs={'refusal': None}, response_metadata={'token_usage': {'completion_tokens': 50, 'prompt_tokens': 35, 'total_tokens': 85, 'completion_tokens_details': None, 'prompt_tokens_details': {'audio_tokens': None, 'cache_write_tokens': None, 'cached_tokens': 0, 'text_tokens': 35}}, 'model_provider': 'dashscope', 'model_name': 'qwen3.8-flash', 'system_fingerprint': None, 'id': 'chatcmpl-fa7293fb-78ee-974b-aaf7-8c843ae530f0', 'finish_reason': 'stop', 'logprobs': None}, id='lc_run--01a0b9b0-c9fd-7e71-89c9-72554d5d4d9a-0', tool_calls=[], invalid_tool_calls=[], usage_metadata={'input_tokens': 35, 'output_tokens': 50, 'total_tokens': 85, 'input_token_details': {'cache_read': 0}, 'output_token_details': {}})]}, 'triggers': ('branch:to:subplot',)}}{'type': 'tasks', 'ns': ('summarize:ba3500ee-db07-9134-dfae-1f8460bd0b06',), 'data': {'id': '14ab2b21-a549-68e8-d6a0-a1b5bafc92a9', 'name': 'subplot', 'error': None, 'result': {'messages': [AIMessage(content='LangGraph 是 LangChain 推出的用于构建有状态、多角色 LLM 应用的框架，通过图结构管理复杂工作流以支持精细控制的智能代理系统开发。', additional_kwargs={'refusal': None}, response_metadata={'token_usage': {'completion_tokens': 37, 'prompt_tokens': 84, 'total_tokens': 121, 'completion_tokens_details': None, 'prompt_tokens_details': {'audio_tokens': None, 'cache_write_tokens': None, 'cached_tokens': 0, 'text_tokens': 84}}, 'model_provider': 'dashscope', 'model_name': 'qwen3.8-flash', 'system_fingerprint': None, 'id': 'chatcmpl-dfc2674c-9d3f-9f35-93b5-7f3f8df6241a', 'finish_reason': 'stop', 'logprobs': None}, id='lc_run--01a0b9b0-d11a-7480-b9f9-941cfdc91e25-0', tool_calls=[], invalid_tool_calls=[], usage_metadata={'input_tokens': 84, 'output_tokens': 37, 'total_tokens': 121, 'input_token_details': {'cache_read': 0}, 'output_token_details': {}})]}, 'interrupts': []}}
+```
+
+
+
+### checkpoints
+
+检查点，每次返回当前的检查点
+
+
+
+### 融合多种模式
+
+``` python
+from typing import TypedDict
+from settings import app_settings
+from langgraph.graph import StateGraph, START, END
+
+
+# ==========================================
+# 1. 定义状态和工具
+# ==========================================
+
+class EditorState(TypedDict):
+    topic: str  # 主题
+    content: str  # 生成的内容
+    score: int  # 评分
+    status: str  # 当前状态描述
+
+
+llm = app_settings.get_qwen_client()
+
+
+# ==========================================
+# 2. 定义节点逻辑
+# ==========================================
+
+def write_article(state: EditorState):
+    """节点1：负责写文章（耗时操作，会有流式输出）"""
+    topic = state["topic"]
+    # 这里我们用 invoke，依靠 stream_mode="messages" 来捕获流
+    response = llm.invoke(f"请写一段关于'{topic}'的短文，50字左右。")
+    return {
+        "content": response.content,
+        "status": "写作完成"
+    }
+
+
+def review_article(state: EditorState):
+    """节点2：负责打分（逻辑操作，瞬间完成）"""
+    # 简单模拟打分逻辑
+    content_len = len(state["content"])
+    score = min(100, content_len * 2)
+    return {
+        "score": score,
+        "status": "评分完成"
+    }
+
+
+# ==========================================
+# 3. 构建图
+# ==========================================
+
+workflow = StateGraph(EditorState)
+
+workflow.add_node("writer", write_article)
+workflow.add_node("reviewer", review_article)
+
+workflow.add_edge(START, "writer")
+workflow.add_edge("writer", "reviewer")
+workflow.add_edge("reviewer", END)
+
+app = workflow.compile()
+
+
+# ==========================================
+# 4. 核心：融合流式输出处理
+# ==========================================
+
+def run_mixed_mode_demo():
+    inputs = {
+        "topic": "人工智能的未来",
+        "content": "",
+        "score": 0,
+        "status": "开始任务"
+    }
+
+    print(f"任务启动：主题 - {inputs['topic']}\n")
+    print("-" * 50)
+
+    # 关键点：传入一个列表 ["messages", "updates", "values"]
+    # 这样 app.stream 会返回一个元组：(mode, chunk)
+    for mode, chunk in app.stream(inputs, stream_mode=["messages", "updates", "values"]):
+
+        # --- 模式 A: Messages (处理打字机效果) ---
+        if mode == "messages":
+            # chunk 结构是 (message, metadata)
+            message, metadata = chunk
+            # 只显示 AI 生成的内容，过滤掉系统消息等
+            if message.content:
+                print(message.content, end="", flush=True)
+
+        # --- 模式 B: Updates (处理节点完成通知) ---
+        elif mode == "updates":
+            # chunk 是该节点刚刚更新的字段
+            # 这里的 chunk 类似于Key-Value：{'writer': {'content': '...', 'status': '...'}}
+            node_name = list(chunk.keys())[0]
+            updates = chunk[node_name]
+            print(f"\n\n[节点完成] {node_name} -> 状态: {updates.get('status')}")
+            if "score" in updates:
+                print(f"[评分结果] 得分: {updates['score']}")
+            print("-" * 50)  # 分割线
+
+        # --- 模式 C: Values (处理全局状态快照) ---
+        elif mode == "values":
+            # chunk 是当前的完整 State
+            print(f"\n📦 [全量状态快照] {chunk}")
+
+    print("\n流程结束！")
+
+
+if __name__ == "__main__":
+    run_mixed_mode_demo()
+
+```
+
+
+
+### 工具
+
+``` python
+import time
+from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages.tool import tool_call
+from langchain_core.tools import tool
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import StateGraph, MessagesState, START, END
+from langgraph.prebuilt import ToolNode, tools_condition
+from langgraph.prebuilt.tool_node import ToolRuntime
+
+from settings import app_settings
+
+llm = app_settings.get_qwen_client()
+
+
+# ============ 1. 流式工具 ============
+@tool
+def long_running_task(query: str, runtime: ToolRuntime) -> str:
+    """模拟耗时任务，逐步推送中间结果。"""
+    steps = 5
+    for i in range(steps):
+        time.sleep(0.4)
+        partial = f"[第 {i+1}/{steps} 步] 正在处理「{query}」..."
+        runtime.emit_output_delta(partial + "\n")
+    return f"「{query}」处理完成，共 {steps} 步。"
+
+
+# ============ 2. 图结构：START → tools → chatbot → END ============
+def chatbot(state: MessagesState):
+    return {"messages": [llm.invoke(state["messages"])]}
+
+
+builder = StateGraph(MessagesState)
+builder.add_node("chatbot", chatbot)
+builder.add_node("tools", ToolNode([long_running_task]))
+builder.add_edge(START, "tools")        # ✅ 直接进 tools，跳过 LLM 首轮
+builder.add_edge("tools", "chatbot")    # 工具跑完，交给 LLM 总结
+builder.add_edge("chatbot", END)
+
+graph = builder.compile(checkpointer=InMemorySaver())
+
+
+# ============ 3. 手动构造 tool_calls 触发 ToolNode ============
+def main():
+    config = {"configurable": {"thread_id": "demo"}}
+
+    input_state = {
+        "messages": [
+            AIMessage(
+                "",   # 不会被 qwen 看到，因为不经过 chatbot 首轮
+                tool_calls=[
+                    tool_call(
+                        name="long_running_task",
+                        args={"query": "数据清洗"},
+                        id="call_001",
+                    )
+                ],
+            )
+        ]
+    }
+
+    print("=" * 60)
+    print("stream_mode='tools'")
+    print("=" * 60)
+
+    for chunk in graph.stream(input_state, config, stream_mode="tools"):
+        event = chunk.get("event")
+        data = chunk.get("data", {})
+
+        if event == "tool-started":
+            print(f"\n🔧 工具启动: {data.get('tool_name')}  (id={data.get('tool_call_id')})")
+            print(f"   入参: {data.get('input')}")
+        elif event == "tool-output-delta":
+            print(data.get("delta", ""), end="", flush=True)
+        elif event == "tool-finished":
+            print(f"\n✅ 工具完成: {data.get('tool_name')}  (id={data.get('tool_call_id')})")
+        elif event == "tool-error":
+            print(f"\n❌ 工具出错: {data.get('error')}")
+
+    print("\n" + "=" * 60)
+    print("最终 state:")
+    final = graph.get_state(config)
+    for m in final.values["messages"]:
+        content = m.content if isinstance(m.content, str) else str(m.content)
+        print(f"  [{type(m).__name__}] {content[:80]}")
+
+
+if __name__ == "__main__":
+    main()
+```
+
+
+
+
+
+### 总结
+
+**checkpoints**、**tasks**和**debug**一般用于调试模式；
+
+
+
+**messages** 和**update**比较多用于给到前端；
+
+
+
+流式输出在父子图模式下，子图需要当成父图的节点，如果不是的话需要拿到父图的config 给到子图；
+
+``` python
+def summarize(state: MessagesState) -> MessagesState:
+    """父图节点：在节点内手动调用子图，需要把父图 config 传下去"""
+    config = get_config()  # ✅ 拿到父图当前节点的运行 config
+    # ✅ 关键：把 config 传给子图 invoke，子图的流式才能冒泡到父图
+    result = summary_subgraph.invoke(state, config=config)
+    # ✅ 把子图结果合并回父图 state，否则白白算了
+    return {"messages": result["messages"]}
+```
+
+
+
+**管道+自定义+llm.stream** 可能**比较直观**一点和 **好控制**，如果采用invoke让langgraph内部自己帮你处理流式输出，尤其是多智能体的方式下比较**黑盒**；
 
 # interrupt 人机交互
 
