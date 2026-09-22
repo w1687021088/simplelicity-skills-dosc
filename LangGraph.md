@@ -3,7 +3,7 @@
 **LangGraph** 是由 **LangChain** 团队推出的一个开源框架，用于构建**复杂、可控、有状态（Stateful）的 AI Agent（智能体）工作流**
 。它的核心思想是：**用图（Graph）来组织 AI 的执行流程，而不是简单的线性调用。**
 
-![image-20260915094236533](/Users/zhangjiewu/Library/Application Support/typora-user-images/image-20260915094236533.png)
+![image-20260915094236533](./image/agent__14.png)
 
 `create_agent` 目前可以实现理解用户意图、自动选择工具、调用工具、根据结果继续推理；但是都基于提示词约束整体的流程，并让 LLM
 决策流程；
@@ -5320,13 +5320,13 @@ def _should_stream(self, *, async_, run_manager=None, **kwargs):
 **当 `_should_stream` 返回 True，`invoke` 内部其实是这么干的：**
 
 ```python
-def invoke(self, input, ...):
-    if self._should_stream(...):
+def invoke(self, input, **kwargs):
+    if self._should_stream(kwargs):
         # 偷偷把 stream 收集成一个最终结果返回
-        chunks = [c for c in self.stream(input, ...)]
+        chunks = [c for c in self.stream(input, **kwargs)]
         return generate_from_stream(iter(chunks))
     # 否则才走真正的非流式 HTTP 请求
-    return self._generate(...)
+    return self._generate(input, **kwargs)
 ```
 
 所以在节点里写 `llm.invoke(...)`，代码看起来是"一次性调用"，但 LangGraph 注入的 callback 让它触发了 `stream` 路径，每个 token 都会通过 `on_llm_new_token` 冒泡到 `stream_mode="messages"`。
