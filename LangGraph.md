@@ -430,6 +430,21 @@ print(graph.invoke({"aggregate": ["start"]}))
 
 另外：节点也可以是**子逻辑流程**，在多智能体开发中用作**子agent**；
 
+
+
+### add_sequence
+
+langGraph 提供了该方法，用于一次性添加节点，避免重复 写法；
+
+同时按照顺序定义**流程边**，建议用在固定的流程上；**动态流程不能这么添加**，不能使用该方法；
+
+``` python
+builder = StateGraph(MessagesState)
+builder.add_sequence([call_llm, delete_messages])  # 可以通过add_sequence一次性添加所以节点
+```
+
+
+
 # 边
 
 **Edge（边）** 是连接节点的通道，表示图中**节点之间的执行跳转关系**。可以把它理解为「节点执行完之后，下一步去哪，是构成
@@ -5258,44 +5273,496 @@ with RedisStore.from_conn_string(DB_URI) as store, \
 
 
 
-### 裁剪消息
+## 裁剪消息
 
 大多数 LLM 都有一个最大支持的上下文窗口（以 token 为单位）。决定何时截断消息的一种方法是计算消息历史记录中的 token 数量，并在接近该限制时进行截断。
 
+
+
+**trim_messages** 方法**langchain** 用来裁剪消息的方法
+
 ``` python
+from langchain_core.messages.utils import trim_messages 
+```
+
+裁剪的策略一般在 LLM 执行之前开始裁剪；
+
+**strategy** 修剪策略 **last**从末尾，**first**从开头， **middle**从中间；一般采用 **last**从末尾，保留最新的消息；
+
+
+
+**token_counter**  使用近似 token 计算，中文长度大概 2.0字符左右=1tokens
+
+一般可以采用**langchain**  提供的方法
+
+``` python
+from langchain_core.messages.utils import count_tokens_approximately
 ```
 
 
 
+示例
+
+``` python
+from langchain_core.messages.utils import (
+    trim_messages,
+    count_tokens_approximately
+)
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import StateGraph, START, MessagesState
+
+from settings import app_settings
+
+llm = app_settings.get_qwen_client()
 
 
-### 删除消息
+def call_llm(state: MessagesState):
+    messages = trim_messages(
+        messages=state["messages"],
+        strategy="last",  # 修剪策略（last从末尾，first从开头， middle从中间）
+        # 使用近似 token 计算，中文长度大概 2.0字符左右=1tokens
+        token_counter=lambda msg: count_tokens_approximately(
+            msg,
+            chars_per_token=2.0,
+        ), # 用来估算token数量
+        max_tokens=300,  # 修剪后的消息总 token 不超过 200
+        start_on="human",  # 控制从哪一类消息开始截取（从最后一个 human 消息开始往前保留）
+        end_on=("human", "ai"),  # 允许哪些角色作为修剪终点
+
+    )
+    print("修剪后的消息：", messages)
+    response = llm.invoke(messages)
+    return {"messages": [response]}
+
+
+checkpointer = InMemorySaver()
+builder = StateGraph(MessagesState)
+builder.add_node(call_llm)
+builder.add_edge(START, "call_llm")
+graph = builder.compile(checkpointer=checkpointer)
+
+config = {"configurable": {"thread_id": "1"}}
+graph.invoke({"messages": "我的名字叫张三"}, config)
+graph.invoke({"messages": "帮我家的猫写一首诗"}, config)
+graph.invoke({"messages": "现在对狗做一样的事情"}, config)
+final_response = graph.invoke({"messages": "我的名字叫什么?"}, config)
+
+print("最终消息：")
+print(final_response["messages"])
+
+```
+
+裁剪消息看情况，裁剪会导致历史消息丢失，使用前需要评估；
+
+
+
+## 删除消息
 
 可以从图表状态中删除消息，以管理消息历史记录。当您想要移除特定消息或清除整个消息历史记录时，此功能非常有用。
 
+
+
+例子
+
 ``` python
+from langchain_core.messages import RemoveMessage
+from langgraph.graph import StateGraph, START, MessagesState
+from langgraph.checkpoint.memory import InMemorySaver
+from settings import app_settings
+
+llm = app_settings.get_qwen_client()
+
+
+def delete_messages(state):
+    messages = state["messages"]
+    if len(messages) > 2:
+        # 删除最早的两条消息
+        return {"messages": [RemoveMessage(id=m.id) for m in messages[:2]]}
+    return None
+
+
+def call_llm(state: MessagesState):
+    response = llm.invoke(state["messages"])
+    return {"messages": response}
+
+
+builder = StateGraph(MessagesState)
+builder.add_sequence([call_llm, delete_messages])
+builder.add_edge(START, "call_llm")
+
+checkpointer = InMemorySaver()
+app = builder.compile(checkpointer=checkpointer)
+
+config = {
+    "configurable": {
+        "thread_id": "1123456"
+    }
+}
+
+for event in app.stream(
+        {"messages": [{"role": "user", "content": "你好呀，我是初见哦"}]},
+        config,
+        stream_mode="values"
+):
+    print([(message.type, message.content) for message in event["messages"]])
+
+for event in app.stream(
+        {"messages": [{"role": "user", "content": "我的名字是什么？"}]},
+        config,
+        stream_mode="values"
+):
+    # 最终回复会把最开始的两条消息删除
+    print([(message.type, message.content) for message in event["messages"]])
+
 ```
 
+删除消息慎用；也会导致消息残缺；
 
 
 
-
-### 摘要消息（总结消息）
+## 摘要消息（总结消息）
 
 修剪或删除消息的问题在于，可能会因剔除消息队列而丢失信息。因此，一些应用程序受益于一种更复杂的方法，即使用聊天模型来汇总消息历史记录。
 
 ![agent__016](./image/agent__016.png)
 
+### 全量重摘
+
+**自己写 LLM 总结：**
+通常的做法是把当前所有历史消息拼成一段 prompt，让 LLM 生成一段摘要。
+
+```python
+# 你的做法
+summary = llm.invoke("请总结以下对话：\n" + "\n".join(all_messages))
+```
+
+**问题**：每次调用都要把**全部历史**重新总结一遍。随着对话变长，token 消耗会越来越大，而且 **LLM** 可能会遗忘早期细节。
+
+
+
+### 增量摘要
+
+**`SummarizationNode`：**
+它内部维护了一个 `RunningSummary`（就是 `context`），记录了：
+
+- 之前的摘要正文
+- 已经被摘要过的消息 ID 列表
+- 最后一条被摘要的消息 ID
+
+它**只把“新消息”和“旧摘要”一起喂给 LLM**，生成更新后的摘要。
+**优势**：token 消耗恒定，不会随对话变长而爆炸，且摘要具有连续性。
+
+
+
+#### context
+
+增量摘要的存储地方，定义在状态里面，并且通过检查点存储，每次通过**SummarizationNode** 摘要的时候都可以使用到；
+
 ``` python
+# 定义状态结构，包含对话历史和摘要上下文
+class SummaryState(MessagesState):
+    context: dict[str, RunningSummary]  # 用于存储用户摘要记忆（running_summary）
+```
+
+摘要节点
+
+``` python
+summarization_node = SummarizationNode(
+    token_counter=lambda messages: count_tokens_approximately(
+        messages,
+        chars_per_token=2.0,
+    ),
+    model=model,
+    max_tokens=500,
+    max_tokens_before_summary=150,
+    max_summary_tokens=128,
+    initial_summary_prompt=initial_summary_prompt,
+    existing_summary_prompt=existing_summary_prompt,
+    final_prompt=final_prompt
+)
 ```
 
 
 
+**model**： 模型必须要有设置最大 tokens 的绑定；
+
+``` python
+llm = app_settings.get_qwen_client()
+
+model = llm.bind(max_tokens=128) # 设置最大值 128
+```
 
 
 
+**max_tokens**：  这是摘要完成后，希望**最终返回的消息列表（摘要 + 剩余消息）所允许的最大 token 数**。它是在**摘要行为发生之后**才被用来做最终校验的。
+
+- **核心作用**：决定压缩后的上下文“瘦身”到什么程度。
+- **注意**：这个预算包含**摘要本身**和**未被摘要的近期消息**。因此，你无法同时让摘要很长、又保留很多近期消息，因为它俩会共享这个总额度。
 
 
+
+**max_tokens_before_summary**： 这是摘要的**触发阈值**。`SummarizationNode` 会从旧到新累加消息的 token 数，一旦**累计值达到或超过**这个数字，就会触发摘要。
+
+- **核心作用**：控制摘要的“灵敏度”。设置得越小，摘要越频繁，上下文压缩得越及时，但 LLM 调用次数会变多。
+- **默认值**：如果未提供，它会**默认为 `max_tokens` 的值**。
+- **特殊用法**：如果将其设为 `None`，则会**完全禁用摘要功能**。
+
+
+
+**max_summary_tokens**： 这是专门为**生成的摘要文本**设置的 token 预算，防止摘要本身变得过长。
+
+- **核心作用**：控制摘要信息的浓缩程度。设置得过小可能导致关键信息丢失；设置得过大则摘要本身会占用过多上下文。
+- **重要提醒**：这个参数**仅用于内部估算**，并不会直接限制 LLM 的输出长度。要真正强制摘要不超过此长度，你需要**手动在传给节点的模型上绑定限制**，例如：`model=llm.bind(max_tokens=max_summary_tokens)`。
+
+
+
+**initial_summary_prompt**： 首次生成摘要的提示词
+
+
+
+**existing_summary_prompt**： 更新摘要的提示词
+
+
+
+**final_prompt**： 模型回答问题之前参考的摘要上下文的提示词
+
+
+
+**input_messages_key**： 告诉 `SummarizationNode` 从 State 的**哪个键**读取原始消息列表。
+
+- **默认值**：`"messages"`。
+- **含义**：节点会读取 `state["messages"]`，并基于这个列表计算 token、判断是否触发摘要、以及定位 `last_summarized_message_id`。
+
+通常不需要改它，因为 LangGraph 的 `MessagesState` 默认就是 `messages`。
+
+
+
+**output_messages_key**： 告诉 `SummarizationNode` 把摘要后的消息列表**写回 State 的哪个键**。
+
+- **默认值**：`"summarized_messages"`。
+- **核心区别**：它和 `input_messages_key` 是否相同，直接决定了**旧消息会不会被自动删除**。
+
+**情况一：两者不同（默认）**
+
+```python
+input_messages_key="messages"          # 读 state["messages"]
+output_messages_key="summarized_messages"  # 写 state["summarized_messages"]
+```
+
+- 节点读取原始 `messages`，生成摘要。
+- 把 `[摘要消息] + [保留的最近消息]` 写入 **新的键** `summarized_messages`。
+- **原始 `messages` 一条都不删**，完整保留。
+- 后续节点如果读 `state["messages"]`，拿到的还是**全量历史**，不是压缩后的。
+
+这适合想把原始历史和压缩上下文分开存放，由自己决定什么时候用哪个。
+
+
+
+**情况二：两者相同**
+
+```python
+input_messages_key="messages"
+output_messages_key="messages"   # 与输入相同
+```
+
+- 节点读取 `state["messages"]`，生成摘要。
+- 用 `RemoveMessage` **删除已被摘要的旧消息**，然后把 `[摘要消息] + [保留的最近消息]` **写回 `state["messages"]`**。
+- 原始消息在 State 中被替换，**不再保留全量历史**。
+- 后续节点读 `state["messages"]`，拿到的就是**压缩后的上下文**。
+
+这适合希望 **checkpointer** 中只保留精简的 LLM 工作上下文，原始消息已存入**外部业务库**。
+
+
+
+#### 谨记
+
+增量摘要**SummarizationNode**需要有检查点，如果没有则增量摘要无意义，每次都是全量；
+
+**context** 是增量摘要很重要的状态添加检查点后与线程 ID 绑定；
+
+
+
+#### 示例
+
+安装**langmem**
+
+``` python
+uv add langmem
+```
+
+预构建的总结消息库，如果不使用的话，就得自己写一套；
+
+``` python
+from langmem.short_term.summarization import SummarizationNode
+```
+
+总结消息节点
+
+``` python
+from langmem.short_term.summarization import RunningSummary
+```
+
+例子
+
+``` python
+from typing import TypedDict
+
+from langchain_core.messages.utils import count_tokens_approximately, AnyMessage
+from langchain_core.prompts import ChatPromptTemplate
+from langgraph.checkpoint.serde.jsonplus import JsonPlusSerializer
+from langgraph.graph import StateGraph, MessagesState
+from langgraph.checkpoint.memory import InMemorySaver
+from langmem.short_term import RunningSummary, SummarizationNode
+
+from settings import app_settings
+
+llm = app_settings.get_qwen_client()
+
+
+# 定义状态结构，包含对话历史和摘要上下文
+class SummaryState(MessagesState):
+    context: dict[str, RunningSummary]  # 用于存储用户摘要记忆（running_summary）
+
+
+# 定义输入格式，传给 call_model 函数使用
+class LLMInputState(TypedDict):
+    summarized_messages: list[AnyMessage]  # 已被压缩/摘要过的消息+历史消息
+    context: dict[str, RunningSummary]
+
+
+checkpointer = InMemorySaver(serde=JsonPlusSerializer(allowed_msgpack_modules=[
+    RunningSummary]))
+
+initial_summary_prompt_text = """请根据以上对话内容，生成一个简洁的摘要，用于帮助后续对话理解上下文。
+
+要求：
+1. 保留用户姓名、身份、目标、偏好和重要结论。
+2. 保留对后续对话仍然有用的重要信息。
+3. 忽略已经完成且对后续对话没有帮助的一次性内容。
+4. 只输出摘要内容，不要添加任何额外说明。
+
+摘要："""
+
+existing_summary_prompt_text = """这是目前的对话摘要：
+
+{existing_summary}
+
+请结合上面的新消息，生成一个新的完整摘要。
+
+要求：
+1. 新摘要完全替换旧摘要，不要简单追加。
+2. 旧摘要中的重要事实必须保留，包括用户姓名、身份、目标、偏好和重要结论。
+3. 除非新消息明确修改，否则不要删除或改变旧摘要中的重要信息。
+4. 合并新消息中的重要信息，删除重复和无关内容。
+5. 只输出新的摘要内容，不要添加任何额外说明。
+
+新摘要："""
+
+final_prompt_text = """你是一位智能助理。
+
+以下是之前对话的摘要，可帮助你理解上下文：
+
+摘要：
+{summary}
+"""
+
+# 首次生成摘要
+initial_summary_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("placeholder", "{messages}"),  # placeholder 才是专门用来把消息列表原样插入 ChatPrompt
+        ("user", initial_summary_prompt_text),
+    ]
+)
+
+# 在已有摘要基础上更新摘要
+existing_summary_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("placeholder", "{messages}"),
+        ("user", existing_summary_prompt_text),
+    ]
+)
+
+# 最终调用模型时，将摘要和未被总结的消息一起传入
+final_prompt = ChatPromptTemplate.from_messages(
+    [
+        ("system", final_prompt_text),
+        ("placeholder", "{messages}"),
+    ]
+)
+
+"""
+ context 是一个 RunningSummary 对象
+     summary: 当前的摘要文本。
+     summarized_message_ids: 已经被包含在摘要中的消息ID集合。
+     last_summarized_message_id: 最后一条被摘要的消息ID。
+
+ 有了这些信息，SummarizationNode 在下次运行时就能只处理新消息，而不是把旧消息再摘要一遍，从而显著提升效率。
+"""
+
+summarization_node = SummarizationNode(
+    token_counter=lambda messages: count_tokens_approximately(
+        messages,
+        chars_per_token=2.0,
+    ),
+    model=llm.bind(max_tokens=128),
+    max_tokens=500,
+    max_tokens_before_summary=150,
+    max_summary_tokens=128,
+    initial_summary_prompt=initial_summary_prompt,
+    existing_summary_prompt=existing_summary_prompt,
+    final_prompt=final_prompt,
+    input_messages_key="messages",  # 读主消息
+    output_messages_key="messages",  # 也写回主消息 → 触发替换/删除， 这样下一个节点的 state 输入会是SummaryState
+)
+
+
+# 模型调用节点：对压缩过的历史消息进行问答
+def call_llm(state: SummaryState): # 如果 output_messages_key 没有设置为messages state 就是 LLMInputState
+    response = llm.invoke(state["messages"])
+    return {
+        "messages": [response],
+    }
+
+
+# 构建 LangGraph 的流程图
+builder = StateGraph(state_schema=SummaryState)
+
+builder.add_node("summarization_node", summarization_node)
+builder.add_node("call_llm", call_llm)
+
+builder.add_edge("__start__", "summarization_node")
+builder.add_edge("summarization_node", "call_llm")
+
+builder.add_edge("call_llm", "__end__")
+
+# 编译图
+graph = builder.compile(checkpointer=checkpointer)
+
+# ========== 流程调用 ==========
+config = {"configurable": {"thread_id": "11111211"}}
+
+for i, msg in enumerate([
+    "你好，我叫青雀，我是一个大模型开发",
+    "请写一首关于猫的诗",
+    "现在也请为狗写一首诗",
+    "你还记得我叫什么名字吗？"
+]):
+    result = graph.invoke({"messages": [{"type": "user", "content": msg}]}, config)
+
+    print('-------')
+    print('-------')
+    print('-------')
+    print('-------')
+    print('-------')
+    print('-------')
+    print('-------')
+    print(f'--第{i}轮---')
+    print(f'--{msg}---')
+    print('-------')
+    for item in result["messages"]:
+        item.pretty_print()
+
+```
 
 
 
