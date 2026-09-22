@@ -3,7 +3,7 @@
 **LangGraph** 是由 **LangChain** 团队推出的一个开源框架，用于构建**复杂、可控、有状态（Stateful）的 AI Agent（智能体）工作流**
 。它的核心思想是：**用图（Graph）来组织 AI 的执行流程，而不是简单的线性调用。**
 
-![image-20260915094236533](./image/agent__14.png)
+![image-20260915094236533](./image/agent__014.png)
 
 `create_agent` 目前可以实现理解用户意图、自动选择工具、调用工具、根据结果继续推理；但是都基于提示词约束整体的流程，并让 LLM
 决策流程；
@@ -4512,6 +4512,7 @@ for checkpoint in history:
 推荐使用 **update_state** 来进行重放；
 
 
+
 # store长期记忆
 
 Store 主要是存储用户画像【用户的行为习惯，用户的爱好、用户相关的一些重要的功能】
@@ -4983,6 +4984,316 @@ if __name__ == "__main__":
 
 
 # 记忆存储
+
+对于人工智能代理来说，记忆至关重要，因为它能让它们记住之前的交互，从反馈中学习，并适应用户的偏好。随着代理需要处理更复杂的任务，并进行大量的用户交互，这种能力对于效率和用户满意度都至关重要。
+
+- 短期记忆（或线程范围的记忆）通过维护会话中的消息历史记录来跟踪正在进行的对话。LangGraph 将短期记忆作为代理状态的一部分进行管理。状态使用检查点持久化到数据库中，以便线程可以随时恢复。短期记忆会在图被调用或某个步骤完成时更新，并且在每个步骤开始时读取状态。
+- 长期记忆跨会话存储用户特定或应用程序级别的数据，并在对话线程之间共享。它可以在任何时间、任何线程中调用。记忆的作用域是任何自定义命名空间，而不仅仅是单个线程 ID。LangGraph 提供存储，方便您保存和调用长期记忆。
+
+
+
+![agent__015](./image/agent__015.png)
+
+## Postgress
+
+安装
+
+``` python
+uv add "psycopg[binary,pool]" langgraph-checkpoint-postgres
+```
+
+
+
+使用 docker 安装 **Postgres** **作为存储**
+
+``` python
+s# 1.使用docker下载对应镜像
+docker pull postgres:alpine # 这边使用的是体积更小的镜像
+```
+
+
+
+``` python
+import uuid
+from dataclasses import dataclass
+
+from langgraph.checkpoint.postgres import PostgresSaver
+from langgraph.graph import StateGraph, START, MessagesState
+from langgraph.runtime import Runtime
+from langgraph.store.postgres import PostgresStore
+
+from settings import app_settings
+
+DB_URI = "postgresql://postgres:12345678@localhost:5432/postgres?sslmode=disable"
+
+llm= app_settings.get_qwen_client()
+
+
+@dataclass
+class Context:
+    user_id: str
+
+
+# --- 2. 定义节点逻辑 ---
+def call_model(state: MessagesState, runtime: Runtime[Context]):
+    user_id = runtime.context.user_id
+    namespace = ("memories", user_id)
+
+    # 检索长期记忆
+    last_user_msg = state["messages"][-1].content
+    memories = runtime.store.search(namespace, query=str(last_user_msg))
+    info = "\n".join([d.value["data"] for d in memories])
+
+    system_msg = f"你是一个有帮助的助手。已知用户信息: {info}"
+
+    # 逻辑存储：如果用户说“记住...”，则存入 Store
+    if "记住" in last_user_msg:
+        # 简单提取“记住”后面的内容（实际生产可用LLM提取）
+        memory_content = last_user_msg.replace("记住", "").strip("：: ")
+        runtime.store.put(namespace, str(uuid.uuid4()), {"data": memory_content})
+        print(f"--- [系统日志] 已存入长期记忆: {memory_content} ---")
+
+    response = llm.invoke(
+        [{"role": "system", "content": system_msg}] + state["messages"]
+    )
+    return {"messages": response}
+
+
+# 使用 context manager 保持连接
+with PostgresStore.from_conn_string(DB_URI) as store, \
+        PostgresSaver.from_conn_string(DB_URI) as checkpointer:
+
+    # 第一次初始化的时候需要
+    checkpointer.setup()
+    store.setup()
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("call_model", call_model)
+    builder.add_edge(START, "call_model")
+    graph = builder.compile(checkpointer=checkpointer, store=store)
+
+    # --- 4. 交互循环 ---
+    current_thread_id = "1"
+    current_user_id = "user_v1"
+
+    print("=== LangGraph 交互系统 ===")
+    print("指令说明: 输入 'switch' 切换会话, 'exit' 退出程序")
+
+    while True:
+        prompt = f"\n[当前线程: {current_thread_id}] 用户: "
+        user_input = input(prompt).strip()
+
+        if user_input.lower() == 'exit':
+            break
+
+        if user_input.lower() == 'switch':
+            new_id = input("请输入新的 Thread ID (例如 1, 2, 3): ")
+            current_thread_id = new_id
+            print(f"--- 已切换到线程 {current_thread_id} ---")
+            continue
+
+        if not user_input:
+            continue
+
+        # 构建配置
+        config = {
+            "configurable": {
+                "thread_id": current_thread_id,
+                "user_id": current_user_id,
+            }
+        }
+
+        # 执行流式输出（使用 values 模式）
+        # 注意：由于我们要手动输入，每次流只传入当前这一条消息
+        for chunk in graph.stream(
+                {"messages": [{"role": "user", "content": user_input}]},
+                config,
+                context=Context(user_id=current_user_id),
+                stream_mode="messages",
+                version="v2"
+        ):
+            if chunk["type"] == "messages":
+                result, metadata = chunk["data"]
+                print(result.content, end="", flush=True)
+
+```
+
+## redis
+
+**使用redis作为存储**
+
+``` python
+uv add langgraph-checkpoint-redis
+```
+
+
+
+``` python
+import uuid
+import os
+from dotenv import load_dotenv
+from langchain.chat_models import init_chat_model
+from langgraph.graph import StateGraph, MessagesState, START
+from langgraph.checkpoint.redis import RedisSaver
+from langgraph.store.redis import RedisStore
+from langgraph.runtime import Runtime
+from dataclasses import dataclass
+
+load_dotenv()
+
+# --- 1. 初始化模型 ---
+llm = init_chat_model(
+    api_key=os.getenv("DASHSCOPE_API_KEY"),
+    base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+    model_provider="openai",
+    model='MiniMax-M2.1'
+)
+
+
+@dataclass
+class Context:
+    user_id: str
+
+
+# --- 2. 定义节点逻辑 ---
+def call_model(state: MessagesState, runtime: Runtime[Context]):
+    user_id = runtime.context.user_id
+    namespace = ("memories", user_id)
+
+    # 检索长期记忆
+    last_user_msg = state["messages"][-1].content
+    memories = runtime.store.search(namespace, query=str(last_user_msg))
+    info = "\n".join([d.value["data"] for d in memories])
+
+    system_msg = f"你是一个有帮助的助手。已知用户信息: {info}"
+
+    # 逻辑存储：如果用户说“记住...”，则存入 Store
+    if "记住" in last_user_msg:
+        # 简单提取“记住”后面的内容（实际生产可用LLM提取）
+        memory_content = last_user_msg.replace("记住", "").strip("：: ")
+        runtime.store.put(namespace, str(uuid.uuid4()), {"data": memory_content})
+        print(f"--- [系统日志] 已存入长期记忆: {memory_content} ---")
+
+    response = llm.invoke(
+        [{"role": "system", "content": system_msg}] + state["messages"]
+    )
+    return {"messages": response}
+
+
+# --- 3. 构建图 ---
+DB_URI = "redis://localhost:6379"
+
+# 使用 context manager 保持连接
+with RedisStore.from_conn_string(DB_URI) as store, \
+        RedisSaver.from_conn_string(DB_URI) as checkpointer:
+    # 第一次初始化的时候需要
+    checkpointer.setup()
+    store.setup()
+
+    builder = StateGraph(MessagesState)
+    builder.add_node("call_model", call_model)
+    builder.add_edge(START, "call_model")
+    graph = builder.compile(checkpointer=checkpointer, store=store)
+
+    # --- 4. 交互循环 ---
+    current_thread_id = "1"
+    current_user_id = "user_v1"
+
+    print("=== LangGraph 交互系统 ===")
+    print("指令说明: 输入 'switch' 切换会话, 'exit' 退出程序")
+
+    while True:
+        prompt = f"\n[当前线程: {current_thread_id}] 用户: "
+        user_input = input(prompt).strip()
+
+        if user_input.lower() == 'exit':
+            break
+
+        if user_input.lower() == 'switch':
+            new_id = input("请输入新的 Thread ID (例如 1, 2, 3): ")
+            current_thread_id = new_id
+            print(f"--- 已切换到线程 {current_thread_id} ---")
+            continue
+
+        if not user_input:
+            continue
+
+        # 构建配置
+        config = {
+            "configurable": {
+                "thread_id": current_thread_id,
+                "user_id": current_user_id,
+            }
+        }
+
+        # 执行流式输出（使用 values 模式）
+        # 注意：由于我们要手动输入，每次流只传入当前这一条消息
+        for chunk in graph.stream(
+                {"messages": [{"role": "user", "content": user_input}]},
+                config,
+                context=Context(user_id=current_user_id),
+                stream_mode="messages",
+                version="v2"
+        ):
+            if chunk["type"] == "messages":
+                result, metadata = chunk["data"]
+                print(result.content, end="", flush=True)
+```
+
+
+
+
+
+
+
+# 管理短期记忆
+
+启用短期记忆后，长对话可能会超出 LLM 的上下文窗口。常见的解决方案如下：
+
+- 修剪消息：删除前 N 条或后 N 条消息（在调用 LLM 之前）
+- 从 LangGraph 状态中永久删除消息
+- 总结消息：总结历史记录中较早的消息，并用摘要替换它们
+- 管理检查点以存储和检索消息历史记录
+- 自定义策略（例如，消息过滤等）
+
+
+
+### 裁剪消息
+
+大多数 LLM 都有一个最大支持的上下文窗口（以 token 为单位）。决定何时截断消息的一种方法是计算消息历史记录中的 token 数量，并在接近该限制时进行截断。
+
+``` python
+```
+
+
+
+
+
+### 删除消息
+
+可以从图表状态中删除消息，以管理消息历史记录。当您想要移除特定消息或清除整个消息历史记录时，此功能非常有用。
+
+``` python
+```
+
+
+
+
+
+### 摘要消息（总结消息）
+
+修剪或删除消息的问题在于，可能会因剔除消息队列而丢失信息。因此，一些应用程序受益于一种更复杂的方法，即使用聊天模型来汇总消息历史记录。
+
+![agent__016](./image/agent__016.png)
+
+``` python
+```
+
+
+
+
+
+
 
 
 
