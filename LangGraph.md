@@ -336,6 +336,10 @@ class State(MessagesState):
     documents: list[str]
 ```
 
+
+
+
+
 # 节点
 
 **节点（Nodes）是图中执行逻辑的基本单位**。每个节点表示一个**函数步骤、处理阶段或子逻辑流程**，多个节点通过边连接成有向图，组成一个完整的有状态计算流程。
@@ -6865,5 +6869,410 @@ def summarize(state: MessagesState) -> MessagesState:
 
 **管道+自定义+llm.stream** 可能**比较直观**一点和 **好控制**，如果采用invoke让langgraph内部自己帮你处理流式输出，尤其是多智能体的方式下比较**黑盒**；
 
+
+
+
+
 # interrupt 人机交互
 
+要在代理或工作流中审核、编辑和批准工具调用，请使用中断来暂停图表并等待人工输入。中断使用 LangGraph 的持久层（该层会保存图表状态）无限期暂停图表执行，直到恢复为止。
+
+
+
+## 暂停使用
+
+动态中断（也称为动态断点）根据图表的当前状态触发。您可以通过在适当的位置调用`interrupt`函数来设置动态中断。图表将暂停，以便人工干预，然后根据人工输入恢复图表。这对于审批、编辑或收集其他上下文等任务非常有用。
+
+
+
+**流式循环只负责收集中断；流式遇到中断必然结束；循环外统一处理并恢复；恢复是一次全新的调用周期，从 checkpointer 精确续跑。这就是最稳健、最不会出错的标准做法。**
+
+
+
+``` python
+from typing import TypedDict, Annotated
+
+from langchain_core.messages import AIMessage
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import StateGraph, START, END, add_messages
+from langgraph.types import interrupt, Command
+
+
+# 1. 定义 State：我们需要一个字段来在节点间传递 days
+class TripState(TypedDict):
+    messages: Annotated[list, add_messages]
+    days: str  # 新增字段，用来存储天数
+
+
+# --- 节点 1: 负责开场白 (副作用) ---
+def start_node(_: TripState):
+    # 这里放你只想执行一次的代码
+    print("\n[AI]: 收到，正在为你规划去‘云南’的旅行...")
+    # 这个节点不返回 messages，只负责打印和过渡
+    return {}
+
+
+# --- 节点 2: 负责提问 + 生成 ---
+def planner_node(_: TripState):
+    # 1. 中断逻辑
+    # 第一次运行：在这里暂停
+    # 恢复运行：直接从这里拿到值，继续往下走，不会回头去跑 start_node
+    days = interrupt("请问你打算去几天？")
+
+    print(f"[AI]: 收到，{days}天。正在生成行程...")
+
+    # 2. 生成逻辑
+    # (这里为了演示简单，直接返回文本，实际可用 LLM)
+    content = f"这是为你生成的云南 {days} 天行程：大理 -> 丽江 -> 香格里拉..."
+    return {"messages": [AIMessage(content=content)], "days": days}
+
+
+# --- 构建图 ---
+builder = StateGraph(TripState)
+
+builder.add_node("start_node", start_node)
+builder.add_node("planner_node", planner_node)
+
+# 连线： Start -> Planner -> End
+builder.add_edge(START, "start_node")
+builder.add_edge("start_node", "planner_node")
+builder.add_edge("planner_node", END)
+
+checkpointer = InMemorySaver()
+graph = builder.compile(checkpointer=checkpointer)
+
+
+
+def run_demo():
+    print("\n=== 案例 1: interrupt 函数 (填空模式) ===")
+    config = {"configurable": {"thread_id": "trip_1"}}
+
+    # ========== 阶段 1：消费 stream，只收集 ==========
+    print(">>> 启动任务...")
+    collected = {}
+
+    for chunk in graph.stream(
+        {"messages": []}, config,
+        stream_mode="values", version="v2",
+    ):
+        for intr in chunk.get("interrupts") or ():
+            collected[intr.id] = intr
+
+    # ========== 阶段 2：stream 结束，处理中断 ==========
+    if not collected:
+        print("无中断")
+        return
+
+    resume_map = {}
+    for intr_id, intr in collected.items():
+        print(f"\n[系统暂停] AI 询问: {intr.value}")
+        answer = input("回答: ")
+        resume_map[intr_id] = answer
+
+    # ========== 阶段 3：一次性恢复 ==========
+    print("恢复执行...")
+    result = graph.invoke(Command(resume=resume_map), config)
+    print(result)
+
+if __name__ == '__main__':
+    run_demo()
+
+```
+
+并行执行
+
+``` python
+from typing import TypedDict, Optional
+
+from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.graph import StateGraph, START, END
+from langgraph.types import interrupt, Command, Interrupt
+
+
+class State(TypedDict):
+    request: str
+    finance_approved: Optional[bool]
+    legal_approved: Optional[bool]
+    result: Optional[str]
+
+
+# ---------- 并行分支 A：财务审批 ----------
+def finance_review(state: State):
+    print(">>> 财务审批中...")
+    decision = interrupt({
+        "type": "finance",
+        "question": f"财务是否批准：{state['request']}？",
+    })
+    return {"finance_approved": decision}
+
+
+# ---------- 并行分支 B：法务审批 ----------
+def legal_review(state: State):
+    print(">>> 法务审批中...")
+    decision = interrupt({
+        "type": "legal",
+        "question": f"法务是否批准：{state['request']}？",
+    })
+    return {"legal_approved": decision}
+
+
+# ---------- 汇聚节点 ----------
+def finalize(state: State):
+    if state.get("finance_approved") and state.get("legal_approved"):
+        return {"result": "✅ 全部通过"}
+    return {"result": "❌ 存在驳回"}
+
+
+builder = StateGraph(State)
+builder.add_node("finance_review", finance_review)
+builder.add_node("legal_review", legal_review)
+builder.add_node("finalize", finalize)
+
+# ⭐ 关键：START 同时扇出到两个节点 → 并行执行
+builder.add_edge(START, "finance_review")
+builder.add_edge(START, "legal_review")
+
+# 两个分支都汇聚到 finalize
+builder.add_edge("finance_review", "finalize")
+builder.add_edge("legal_review", "finalize")
+
+builder.add_edge("finalize", END)
+
+graph = builder.compile(checkpointer=InMemorySaver())
+config = {"configurable": {"thread_id": "req-001"}}
+
+
+def run_demo():
+    print("\n=== 案例 1: interrupt 函数 (填空模式) ===")
+
+    print(">>> 启动任务...")
+
+    # ========== 阶段 1：消费 stream，收集所有中断 ==========
+    collected_interrupts = {}
+
+    for chunk in graph.stream(
+            {"request": "采购一台服务器"},
+            config,
+            stream_mode="values",
+            version="v2",
+    ):
+        # 正常内容渲染（可选）
+        # render(chunk["data"])
+        for intr in chunk.get("interrupts") or ():
+            collected_interrupts[intr.id] = intr  # 用 dict 去重
+
+    # ========== 阶段 2：stream 结束，统一处理中断 ==========
+    if not collected_interrupts:
+        print("无中断，流程已结束")
+        print(graph.get_state(config).values)
+        return
+
+    print(f"\n共收集到 {len(collected_interrupts)} 个中断")
+
+    resume_map = {}  # ← 每次恢复前新建
+    for intr_id, intr in collected_interrupts.items():
+        question = intr.value.get("question", "请审批")
+        intr_type = intr.value.get("type", "unknown")
+
+        user_input = input(f"\n[{intr_type}] {question} (y/N): ").strip().lower()
+        resume_map[intr_id] = (user_input == "y")
+
+    print(f"\n恢复映射: {resume_map}")
+
+    # ========== 阶段 3：一次性恢复所有中断 ==========
+    result = graph.invoke(Command(resume=resume_map), config)
+
+    print("\n=== 最终结果 ===")
+    print(result)
+
+
+if __name__ == '__main__':
+    run_demo()
+
+```
+
+最佳实现：**一个节点一个中断 + 条件自循环边**，避免多轮恢复，**`interrupt()` 是通过抛异常来暂停的。异常一抛，函数立刻退出，后面的 `interrupt()` 根本没机会执行。所以第二个中断在第一次执行时“不存在”，自然收集不到。**
+
+
+
+上面的例子中**恢复**采用 **invoke**，这是阻塞的，如果还需要和开始节点流式输出，那么需要改为 **stream**
+
+``` python
+def run_demo():
+    # ========== 阶段 1：stream 收集 ==========
+    collected = {}
+    for chunk in graph.stream(
+        {"request": "采购一台服务器"}, config,
+        stream_mode="values", version="v2",
+    ):
+        # 渲染正常内容
+        # render(chunk["data"])
+
+        for intr in chunk.get("interrupts") or ():
+            collected[intr.id] = intr
+
+    if not collected:
+        return
+
+    # ========== 阶段 2：循环外处理 ==========
+    resume_map = {}
+    for intr_id, intr in collected.items():
+        # 询问用户，构造 resume_map
+        ...
+
+    # ========== 阶段 3：stream 恢复（保持流式） ==========
+    for chunk in graph.stream(
+        Command(resume=resume_map), config,
+        stream_mode="values", version="v2",
+    ):
+        # 继续渲染正常内容
+        # render(chunk["data"])
+
+        # 兜底：万一恢复后又产生新中断
+        for intr in chunk.get("interrupts") or ():
+            collected[intr.id] = intr
+            # 需要的话，再走一轮恢复
+```
+
+
+
+
+
+## 核心机制
+
+| 概念       | 说明                                               |
+| :--------- | :------------------------------------------------- |
+| **本质**   | `interrupt()` 通过抛出特殊异常暂停图执行           |
+| **暂停时** | Checkpointer 持久化状态，中断载荷返回给调用者      |
+| **恢复时** | `Command(resume=...)` 将值注入，节点**从开头重跑** |
+| **返回值** | `resume` 的值成为 `interrupt()` 的返回值           |
+
+
+
+## 三个必要条件
+
+1. **必须配置 Checkpointer**——否则无法暂停和恢复
+2. **必须指定 `thread_id`**——运行时靠它找到暂停的状态
+3. **中断载荷必须 JSON 可序列化**——字符串、对象、数组都可以
+
+
+
+## 触发与恢复
+
+### 触发（首次调用）
+
+```python
+result = graph.invoke({"messages": [...]}, config)
+# 中断信息在 result["__interrupt__"] 或 stream 的 part["interrupts"]
+```
+
+
+
+### 恢复（再次调用）
+
+```python
+graph.invoke(Command(resume=value), config)  # thread_id 必须相同
+```
+
+
+
+### 恢复的四种形态
+
+| 场景                   | 写法                                            |
+| :--------------------- | :---------------------------------------------- |
+| 单个中断               | `Command(resume=value)`                         |
+| 同节点多个中断，不建议 | `Command(resume=[v1, v2])` 按调用顺序           |
+| 并行中断               | `Command(resume={id1: v1, id2: v2})` 按 ID 映射 |
+| 恢复并改状态           | `Command(update={...}, resume=value)`           |
+| 恢复并跳转             | `Command(resume=value, goto="node")`            |
+
+
+
+## 并行中断（重点）
+
+**识别**：多个节点同时 `interrupt()`，`graph.get_state(config).interrupts` 返回多个对象。
+
+**恢复**：必须用 `{interrupt_id: value}` 映射，**不能只传单值**。
+
+```python
+state = graph.get_state(config)
+resume_map = {intr.id: 业务逻辑(intr.value) for intr in state.interrupts}
+graph.invoke(Command(resume=resume_map), config)
+```
+
+
+
+**前提**：所有并行分支必须汇聚到同一节点，否则状态悬空。
+
+
+
+## 顺序中断 vs 并行中断
+
+| 类型     | 来源               | 恢复方式                      |
+| :------- | :----------------- | :---------------------------- |
+| **顺序** | 同一节点内多次调用 | `Command(resume=[v1, v2])`    |
+| **并行** | 不同节点同时中断   | `Command(resume={id: value})` |
+
+**判断标准**：看中断是否来自**同一节点**——是则用列表，否则用 ID 映射。
+
+
+
+## 硬性约束（踩了必崩）
+
+| 规则                                     | 原因                                   |
+| :--------------------------------------- | :------------------------------------- |
+| ❌ 禁止裸 `try/except` 包裹               | 会吞掉暂停异常，中断无法传递           |
+| ❌ 禁止条件性跳过 `interrupt()`           | 恢复时索引错位，值匹配错误             |
+| ❌ 禁止在循环中直接调用                   | 循环次数不定，中断数量不一致           |
+| ❌ 禁止并行中断用单值恢复                 | 运行时会抛 `RuntimeError`              |
+| ❌ 禁止用 `replay` 替代 `Command(resume)` | replay 会重复执行副作用 + 再次触发中断 |
+
+
+
+## 副作用与幂等性（最关键的工程约束）
+
+因为恢复时节点**从开头重跑**，`interrupt()` 之前的副作用会**重复执行**。
+
+**正确模式**：
+
+```python
+prepare_payment()              # 幂等准备
+interrupt(approval_payload)    # 等待审批
+execute_payment(idempotency_key)  # 带幂等键的实际操作
+```
+
+**原则**：能放到 `interrupt()` 之后的副作用，绝不放前面。
+
+
+
+## 状态检查与操作
+
+```python
+# 查看当前状态
+state = graph.get_state(config)
+state.values          # 当前 State
+state.interrupts      # 所有未决中断
+state.next            # 下一步要执行的节点
+
+# 修改状态
+graph.update_state(config, {"field": "new_value"})
+
+# 查看历史检查点
+for cp in graph.get_state_history(config):
+    print(cp.config, cp.values)
+```
+
+
+
+## 流式输出（v2）
+
+```python
+for part in graph.stream(input, config, stream_mode="values", version="v2"):
+    if part["interrupts"]:
+        for intr in part["interrupts"]:
+            print(intr.id, intr.value)
+```
+
+
+
+`v2` 相比 `v1`：中断载荷从 `__interrupt__` 键移到独立的 `interrupts` 字段，**类型安全 + IDE 友好**。
