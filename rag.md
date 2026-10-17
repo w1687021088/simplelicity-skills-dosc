@@ -1980,59 +1980,34 @@ structs = index_store.index_structs()
           )
 ```
 
+或者通过 `set_index_id`
+
+``` python
+# 必须在创建后手动设置 summary，触发底层写入数据库
+index.summary = index_summary
+
+# 设置索引 ID
+index.set_index_id(index_id)
+```
+
+
+
 #### 操作：mongodb 文档存储
 
 ``` python
 pip install llama-index-storage-docstore-mongodb
 pip install pymongo
 
-
-from llama_index.core import (
-    SimpleDirectoryReader,
-    StorageContext
-)
-from llama_index.core.node_parser import SentenceSplitter
 from llama_index.storage.docstore.mongodb import MongoDocumentStore
 
 
-# 1. 加载文档
-documents = SimpleDirectoryReader(
-    input_files=["../data_file/小说.txt"]
-).load_data()
-
-
-# 2. 文档切分
-nodes = SentenceSplitter(
-    chunk_size=512,
-    chunk_overlap=50
-).get_nodes_from_documents(documents)
-
-print(f"切分后的 Node 数量：{len(nodes)}")
-
-# 3. 创建 Mongo DocStore
+# 创建 Mongo DocStore
 docstore = MongoDocumentStore.from_uri(
     uri="mongodb://localhost:27017",
     db_name="llama_index",
     # 命名空间文档多了之后方便做隔离
     namespace="novel"
 )
-
-# 4. 创建 StorageContext
-storage_context = StorageContext.from_defaults(
-    docstore=docstore
-)
-
-# 5. 存储 Node 到 MongoDB
-# storage_context.docstore.add_documents(nodes)
-# print("Node 已成功存入 MongoDB")
-
-
-# 6. 查看 Mongo 中的数据
-print("\n=============== DocStore 数据 ===============\n")
-for node_id, node in list(storage_context.docstore.docs.items())[:3]:
-    print(f"Node ID: {node_id}")
-    print(node.text[:100])
-    print("-" * 50)
 ```
 
 
